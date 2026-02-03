@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["ocrch-core","ocrch-sdk"]
+members = ["ocrch-core", "ocrch-sdk"]
 
 [workspace.dependencies]
 # Runtime
@@ -24,11 +24,11 @@ sqlx = { version = "0.8", features = [
     "rust_decimal",
     "json",
 ] }
-redis = { version = "1.0", features = ["tokio-comp", "uuid", "json"] }
 axum = { version = "0.8", features = ["macros", "form"] }
 tower = "0.5"
 reqwest = { version = "0.12", features = ["json", "gzip", "brotli", "zstd", "deflate"] }
-
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry", "json"] }
 
 # Serialization & Deserialization
 serde = { version = "1.0", features = ["derive"] }
@@ -57,5 +57,5 @@ smallvec = { version = "1.14.0", features = [
 
 # Security
 rand = "0.9"
-ring = "0.17"
+ring = { version = "0.17", features = ["std"] }
 sha2 = "0.10"
