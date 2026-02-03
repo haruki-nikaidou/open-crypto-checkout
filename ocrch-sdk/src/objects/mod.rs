@@ -43,6 +43,9 @@ impl<T: Signature> SignedObject<T> {
         }
         Ok(self.body)
     }
+    pub fn stringify_signature(&self) -> String {
+        fast32::base64::RFC4648_NOPAD.encode(&self.signature)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
