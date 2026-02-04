@@ -81,10 +81,7 @@ impl PoolingManager {
                 let key = PoolingKey::new(blockchain, token);
                 let state = PoolingState {
                     // Start with epoch to use maximum interval initially
-                    last_pending_at: time::PrimitiveDateTime::new(
-                        time::Date::from_calendar_date(1970, time::Month::January, 1).unwrap(),
-                        time::Time::MIDNIGHT,
-                    ),
+                    last_pending_at: time::PrimitiveDateTime::MIN,
                     tick_sender: sender,
                 };
                 (key, state)

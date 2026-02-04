@@ -9,6 +9,8 @@
 //! Each enabled token on each blockchain has its own BlockchainSync instance.
 
 use crate::entities::erc20_pending_deposit::EtherScanChain;
+use crate::entities::erc20_transfer::{Erc20TokenTransfer, Erc20TransferInsert};
+use crate::entities::trc20_transfer::{Trc20TokenTransfer, Trc20TransferInsert};
 use crate::entities::StablecoinName;
 use crate::events::{BlockchainTarget, MatchTick, MatchTickSender, PoolingTickReceiver};
 use async_trait::async_trait;
@@ -148,18 +150,7 @@ impl Erc20BlockchainSync {
 
     /// Get the last synced block number from the database.
     async fn get_last_block(&self, pool: &PgPool) -> Result<i64, SyncError> {
-        let result = sqlx::query_scalar!(
-            r#"
-            SELECT COALESCE(MAX(block_number), 0) as "block_number!"
-            FROM erc20_token_transfers
-            WHERE chain = $1 AND token_name = $2
-            "#,
-            self.chain as EtherScanChain,
-            self.token as StablecoinName,
-        )
-        .fetch_one(pool)
-        .await?;
-
+        let result = Erc20TokenTransfer::get_last_block(pool, self.chain, self.token).await?;
         Ok(result)
     }
 
@@ -207,26 +198,18 @@ impl Erc20BlockchainSync {
             let divisor = rust_decimal::Decimal::from(10u64.pow(decimals));
             let normalized_value = value / divisor;
 
-            let result = sqlx::query!(
-                r#"
-                INSERT INTO erc20_token_transfers 
-                (token_name, chain, from_address, to_address, txn_hash, value, block_number, block_timestamp)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                ON CONFLICT (txn_hash, chain) DO NOTHING
-                "#,
-                self.token as StablecoinName,
-                self.chain as EtherScanChain,
-                transfer.from,
-                transfer.to,
-                transfer.hash,
-                normalized_value,
+            let transfer_insert = Erc20TransferInsert {
+                token_name: self.token,
+                chain: self.chain,
+                from_address: transfer.from,
+                to_address: transfer.to,
+                txn_hash: transfer.hash,
+                value: normalized_value,
                 block_number,
                 block_timestamp,
-            )
-            .execute(pool)
-            .await?;
+            };
 
-            if result.rows_affected() > 0 {
+            if Erc20TokenTransfer::insert(pool, &transfer_insert).await? {
                 inserted += 1;
             }
         }
@@ -320,17 +303,7 @@ impl Trc20BlockchainSync {
 
     /// Get the last synced timestamp from the database.
     async fn get_last_timestamp(&self, pool: &PgPool) -> Result<i64, SyncError> {
-        let result = sqlx::query_scalar!(
-            r#"
-            SELECT COALESCE(MAX(block_timestamp), 0) as "block_timestamp!"
-            FROM trc20_token_transfers
-            WHERE token_name = $1
-            "#,
-            self.token as StablecoinName,
-        )
-        .fetch_one(pool)
-        .await?;
-
+        let result = Trc20TokenTransfer::get_last_timestamp(pool, self.token).await?;
         Ok(result)
     }
 
@@ -363,25 +336,17 @@ impl Trc20BlockchainSync {
             let divisor = rust_decimal::Decimal::from(10u64.pow(transfer.decimals as u32));
             let normalized_value = value / divisor;
 
-            let result = sqlx::query!(
-                r#"
-                INSERT INTO trc20_token_transfers 
-                (token_name, from_address, to_address, txn_hash, value, block_number, block_timestamp)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                ON CONFLICT (txn_hash) DO NOTHING
-                "#,
-                self.token as StablecoinName,
-                transfer.from_address,
-                transfer.to_address,
-                transfer.transaction_id,
-                normalized_value,
-                transfer.block as i64,
-                transfer.block_ts,
-            )
-            .execute(pool)
-            .await?;
+            let transfer_insert = Trc20TransferInsert {
+                token_name: self.token,
+                from_address: transfer.from_address,
+                to_address: transfer.to_address,
+                txn_hash: transfer.transaction_id,
+                value: normalized_value,
+                block_number: transfer.block,
+                block_timestamp: transfer.block_ts,
+            };
 
-            if result.rows_affected() > 0 {
+            if Trc20TokenTransfer::insert(pool, &transfer_insert).await? {
                 inserted += 1;
             }
         }

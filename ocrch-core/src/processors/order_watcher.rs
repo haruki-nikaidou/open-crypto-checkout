@@ -8,8 +8,11 @@
 //! - Updating transfer status to `Matched` and linking `fulfillment_id`
 //! - Emitting `WebhookEvent::OrderStatusChanged` for successful matches
 
-use crate::entities::erc20_pending_deposit::EtherScanChain;
-use crate::entities::order_records::OrderStatus;
+use crate::entities::erc20_pending_deposit::{Erc20PendingDeposit, Erc20PendingDepositMatch, EtherScanChain};
+use crate::entities::erc20_transfer::{Erc20TokenTransfer, Erc20UnmatchedTransfer};
+use crate::entities::order_records::{OrderRecord, OrderStatus};
+use crate::entities::trc20_pending_deposit::{Trc20PendingDeposit, Trc20PendingDepositMatch};
+use crate::entities::trc20_transfer::{Trc20TokenTransfer, Trc20UnmatchedTransfer};
 use crate::entities::StablecoinName;
 use crate::events::{
     BlockchainTarget, MatchTick, MatchTickReceiver, WebhookEvent, WebhookEventSender,
@@ -29,7 +32,7 @@ pub enum MatchError {
     Database(#[from] sqlx::Error),
 }
 
-/// A pending deposit that can be matched.
+/// A generic pending deposit that can be matched.
 #[derive(Debug)]
 struct PendingDepositMatch {
     id: i64,
@@ -39,13 +42,59 @@ struct PendingDepositMatch {
     started_at_timestamp: i64,
 }
 
-/// An unmatched transfer that needs matching.
+impl From<Erc20PendingDepositMatch> for PendingDepositMatch {
+    fn from(d: Erc20PendingDepositMatch) -> Self {
+        Self {
+            id: d.id,
+            order_id: d.order_id,
+            wallet_address: d.wallet_address,
+            value: d.value,
+            started_at_timestamp: d.started_at_timestamp,
+        }
+    }
+}
+
+impl From<Trc20PendingDepositMatch> for PendingDepositMatch {
+    fn from(d: Trc20PendingDepositMatch) -> Self {
+        Self {
+            id: d.id,
+            order_id: d.order_id,
+            wallet_address: d.wallet_address,
+            value: d.value,
+            started_at_timestamp: d.started_at_timestamp,
+        }
+    }
+}
+
+/// A generic unmatched transfer that needs matching.
 #[derive(Debug)]
 struct UnmatchedTransfer {
     id: i64,
     to_address: String,
     value: Decimal,
     block_timestamp: i64,
+}
+
+impl From<Erc20UnmatchedTransfer> for UnmatchedTransfer {
+    fn from(t: Erc20UnmatchedTransfer) -> Self {
+        Self {
+            id: t.id,
+            to_address: t.to_address,
+            value: t.value,
+            block_timestamp: t.block_timestamp,
+        }
+    }
+}
+
+impl From<Trc20UnmatchedTransfer> for UnmatchedTransfer {
+    fn from(t: Trc20UnmatchedTransfer) -> Self {
+        Self {
+            id: t.id,
+            to_address: t.to_address,
+            value: t.value,
+            block_timestamp: t.block_timestamp,
+        }
+    }
 }
 
 /// OrderBookWatcher handles matching pending deposits to blockchain transfers.
@@ -303,27 +352,11 @@ impl OrderBookWatcher {
         chain: EtherScanChain,
         token: StablecoinName,
     ) -> Result<Vec<PendingDepositMatch>, MatchError> {
-        let deposits = sqlx::query_as!(
-            PendingDepositMatch,
-            r#"
-            SELECT 
-                d.id,
-                d."order" as order_id,
-                d.wallet_address,
-                d.value,
-                EXTRACT(EPOCH FROM d.started_at)::bigint as "started_at_timestamp!"
-            FROM erc20_pending_deposits d
-            JOIN order_records o ON d."order" = o.order_id
-            WHERE d.chain = $1 
-              AND d.token_name = $2
-              AND o.status = 'pending'
-            "#,
-            chain as EtherScanChain,
-            token as StablecoinName,
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
+        let deposits = Erc20PendingDeposit::get_for_matching(&self.pool, chain, token)
+            .await?
+            .into_iter()
+            .map(PendingDepositMatch::from)
+            .collect();
         Ok(deposits)
     }
 
@@ -332,25 +365,11 @@ impl OrderBookWatcher {
         &self,
         token: StablecoinName,
     ) -> Result<Vec<PendingDepositMatch>, MatchError> {
-        let deposits = sqlx::query_as!(
-            PendingDepositMatch,
-            r#"
-            SELECT 
-                d.id,
-                d."order" as order_id,
-                d.wallet_address,
-                d.value,
-                EXTRACT(EPOCH FROM d.started_at)::bigint as "started_at_timestamp!"
-            FROM trc20_pending_deposits d
-            JOIN order_records o ON d."order" = o.order_id
-            WHERE d.token_name = $1
-              AND o.status = 'pending'
-            "#,
-            token as StablecoinName,
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
+        let deposits = Trc20PendingDeposit::get_for_matching(&self.pool, token)
+            .await?
+            .into_iter()
+            .map(PendingDepositMatch::from)
+            .collect();
         Ok(deposits)
     }
 
@@ -360,27 +379,11 @@ impl OrderBookWatcher {
         chain: EtherScanChain,
         token: StablecoinName,
     ) -> Result<Vec<UnmatchedTransfer>, MatchError> {
-        let transfers = sqlx::query_as!(
-            UnmatchedTransfer,
-            r#"
-            SELECT 
-                id,
-                to_address,
-                value,
-                block_timestamp
-            FROM erc20_token_transfers
-            WHERE chain = $1 
-              AND token_name = $2
-              AND status = 'waiting_for_match'
-              AND blockchain_confirmed = true
-            ORDER BY block_timestamp ASC
-            "#,
-            chain as EtherScanChain,
-            token as StablecoinName,
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
+        let transfers = Erc20TokenTransfer::get_unmatched(&self.pool, chain, token)
+            .await?
+            .into_iter()
+            .map(UnmatchedTransfer::from)
+            .collect();
         Ok(transfers)
     }
 
@@ -389,25 +392,11 @@ impl OrderBookWatcher {
         &self,
         token: StablecoinName,
     ) -> Result<Vec<UnmatchedTransfer>, MatchError> {
-        let transfers = sqlx::query_as!(
-            UnmatchedTransfer,
-            r#"
-            SELECT 
-                id,
-                to_address,
-                value,
-                block_timestamp
-            FROM trc20_token_transfers
-            WHERE token_name = $1
-              AND status = 'waiting_for_match'
-              AND blockchain_confirmed = true
-            ORDER BY block_timestamp ASC
-            "#,
-            token as StablecoinName,
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
+        let transfers = Trc20TokenTransfer::get_unmatched(&self.pool, token)
+            .await?
+            .into_iter()
+            .map(UnmatchedTransfer::from)
+            .collect();
         Ok(transfers)
     }
 
@@ -422,52 +411,16 @@ impl OrderBookWatcher {
         let mut tx = self.pool.begin().await?;
 
         // Update transfer status to matched
-        sqlx::query!(
-            r#"
-            UPDATE erc20_token_transfers
-            SET status = 'matched', fulfillment_id = $1
-            WHERE id = $2
-            "#,
-            deposit_id,
-            transfer_id,
-        )
-        .execute(&mut *tx)
-        .await?;
+        Erc20TokenTransfer::mark_matched_tx(&mut tx, transfer_id, deposit_id).await?;
 
         // Update order status to paid
-        sqlx::query!(
-            r#"
-            UPDATE order_records
-            SET status = 'paid'
-            WHERE order_id = $1
-            "#,
-            order_id,
-        )
-        .execute(&mut *tx)
-        .await?;
+        OrderRecord::update_status_tx(&mut tx, order_id, OrderStatus::Paid).await?;
 
         // Delete other pending deposits for this order (keep only the matched one)
-        sqlx::query!(
-            r#"
-            DELETE FROM erc20_pending_deposits
-            WHERE "order" = $1 AND id != $2
-            "#,
-            order_id,
-            deposit_id,
-        )
-        .execute(&mut *tx)
-        .await?;
+        Erc20PendingDeposit::delete_for_order_except_tx(&mut tx, order_id, deposit_id).await?;
 
         // Also delete any TRC-20 pending deposits for this order
-        sqlx::query!(
-            r#"
-            DELETE FROM trc20_pending_deposits
-            WHERE "order" = $1
-            "#,
-            order_id,
-        )
-        .execute(&mut *tx)
-        .await?;
+        Trc20PendingDeposit::delete_for_order_tx(&mut tx, order_id).await?;
 
         tx.commit().await?;
 
@@ -484,52 +437,16 @@ impl OrderBookWatcher {
         let mut tx = self.pool.begin().await?;
 
         // Update transfer status to matched
-        sqlx::query!(
-            r#"
-            UPDATE trc20_token_transfers
-            SET status = 'matched', fulfillment_id = $1
-            WHERE id = $2
-            "#,
-            deposit_id,
-            transfer_id,
-        )
-        .execute(&mut *tx)
-        .await?;
+        Trc20TokenTransfer::mark_matched_tx(&mut tx, transfer_id, deposit_id).await?;
 
         // Update order status to paid
-        sqlx::query!(
-            r#"
-            UPDATE order_records
-            SET status = 'paid'
-            WHERE order_id = $1
-            "#,
-            order_id,
-        )
-        .execute(&mut *tx)
-        .await?;
+        OrderRecord::update_status_tx(&mut tx, order_id, OrderStatus::Paid).await?;
 
         // Delete other pending deposits for this order (keep only the matched one)
-        sqlx::query!(
-            r#"
-            DELETE FROM trc20_pending_deposits
-            WHERE "order" = $1 AND id != $2
-            "#,
-            order_id,
-            deposit_id,
-        )
-        .execute(&mut *tx)
-        .await?;
+        Trc20PendingDeposit::delete_for_order_except_tx(&mut tx, order_id, deposit_id).await?;
 
         // Also delete any ERC-20 pending deposits for this order
-        sqlx::query!(
-            r#"
-            DELETE FROM erc20_pending_deposits
-            WHERE "order" = $1
-            "#,
-            order_id,
-        )
-        .execute(&mut *tx)
-        .await?;
+        Erc20PendingDeposit::delete_for_order_tx(&mut tx, order_id).await?;
 
         tx.commit().await?;
 
@@ -544,34 +461,11 @@ impl OrderBookWatcher {
     ) -> Result<(), MatchError> {
         // Find transfers that have been waiting too long and mark as no_matched_deposit
         // These are transfers older than 1 hour that haven't been matched
-        let old_transfers = sqlx::query_scalar!(
-            r#"
-            SELECT id
-            FROM erc20_token_transfers
-            WHERE chain = $1 
-              AND token_name = $2
-              AND status = 'waiting_for_match'
-              AND blockchain_confirmed = true
-              AND created_at < NOW() - INTERVAL '1 hour'
-            "#,
-            chain as EtherScanChain,
-            token as StablecoinName,
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let old_transfers = Erc20TokenTransfer::get_old_unmatched_ids(&self.pool, chain, token).await?;
 
         for transfer_id in old_transfers {
             // Update status
-            sqlx::query!(
-                r#"
-                UPDATE erc20_token_transfers
-                SET status = 'no_matched_deposit'
-                WHERE id = $1
-                "#,
-                transfer_id,
-            )
-            .execute(&self.pool)
-            .await?;
+            Erc20TokenTransfer::mark_no_matched_deposit(&self.pool, transfer_id).await?;
 
             // Emit webhook event for unknown transfer
             let event = WebhookEvent::UnknownTransferReceived {
@@ -594,32 +488,11 @@ impl OrderBookWatcher {
     /// Check for unknown TRC-20 transfers and emit webhook events.
     async fn check_trc20_unknown_transfers(&self, token: StablecoinName) -> Result<(), MatchError> {
         // Find transfers that have been waiting too long and mark as no_matched_deposit
-        let old_transfers = sqlx::query_scalar!(
-            r#"
-            SELECT id
-            FROM trc20_token_transfers
-            WHERE token_name = $1
-              AND status = 'waiting_for_match'
-              AND blockchain_confirmed = true
-              AND created_at < NOW() - INTERVAL '1 hour'
-            "#,
-            token as StablecoinName,
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let old_transfers = Trc20TokenTransfer::get_old_unmatched_ids(&self.pool, token).await?;
 
         for transfer_id in old_transfers {
             // Update status
-            sqlx::query!(
-                r#"
-                UPDATE trc20_token_transfers
-                SET status = 'no_matched_deposit'
-                WHERE id = $1
-                "#,
-                transfer_id,
-            )
-            .execute(&self.pool)
-            .await?;
+            Trc20TokenTransfer::mark_no_matched_deposit(&self.pool, transfer_id).await?;
 
             // Emit webhook event for unknown transfer
             let event = WebhookEvent::UnknownTransferReceived {

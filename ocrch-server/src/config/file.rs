@@ -11,8 +11,7 @@ use std::net::SocketAddr;
 pub struct FileConfig {
     pub server: ServerConfig,
     pub admin: AdminConfig,
-    #[serde(default)]
-    pub merchants: Vec<MerchantConfig>,
+    pub merchant: MerchantConfig,
     #[serde(default)]
     pub wallets: Vec<WalletConfig>,
 }
@@ -40,14 +39,10 @@ pub struct AdminConfig {
 /// Merchant configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MerchantConfig {
-    /// Unique merchant identifier.
-    pub id: String,
     /// Human-readable merchant name.
     pub name: String,
     /// Secret key for signing API requests.
     pub secret: String,
-    /// URL to send webhook notifications to.
-    pub webhook_url: String,
     /// List of allowed origins for CORS (frontend URLs).
     #[serde(default)]
     pub allowed_origins: Vec<String>,
@@ -84,8 +79,7 @@ listen = "127.0.0.1:3000"
 [admin]
 secret = "test-secret"
 
-[[merchants]]
-id = "merchant_1"
+[merchants]
 name = "Test Store"
 secret = "secret123"
 webhook_url = "https://example.com/webhook"
@@ -98,7 +92,7 @@ enabled_coins = ["USDT", "USDC"]
 "#;
         let config: FileConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.server.listen.port(), 3000);
-        assert_eq!(config.merchants.len(), 1);
+        assert_eq!(config.merchant.name, "Test Store");
         assert_eq!(config.wallets.len(), 1);
         assert!(!config.is_admin_secret_hashed());
     }
@@ -112,7 +106,11 @@ enabled_coins = ["USDT", "USDC"]
             admin: AdminConfig {
                 secret: "$argon2id$v=19$m=19456,t=2,p=1$abc123".to_string(),
             },
-            merchants: vec![],
+            merchant: MerchantConfig {
+                name: "Test Store".to_string(),
+                secret: "secret123".to_string(),
+                allowed_origins: vec![],
+            },
             wallets: vec![],
         };
         assert!(config.is_admin_secret_hashed());

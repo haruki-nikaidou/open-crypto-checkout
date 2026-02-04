@@ -60,9 +60,8 @@ async fn main() -> anyhow::Result<()> {
     let shared_config = loaded_config.into_shared();
 
     // Get database URL from environment
-    let database_url = get_database_url().map_err(|e| {
+    let database_url = get_database_url().inspect_err(|e| {
         tracing::error!("DATABASE_URL environment variable not set");
-        e
     })?;
 
     // Create database connection pool

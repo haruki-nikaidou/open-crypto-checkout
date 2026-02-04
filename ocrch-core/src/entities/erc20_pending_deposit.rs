@@ -68,7 +68,18 @@ pub struct Erc20PendingDepositInsert {
     pub value: rust_decimal::Decimal,
 }
 
+/// A pending deposit for matching operations.
+#[derive(Debug, Clone)]
+pub struct Erc20PendingDepositMatch {
+    pub id: i64,
+    pub order_id: uuid::Uuid,
+    pub wallet_address: String,
+    pub value: rust_decimal::Decimal,
+    pub started_at_timestamp: i64,
+}
+
 impl Erc20PendingDeposit {
+    /// Insert a new pending deposit.
     pub async fn insert_new(
         pool: &sqlx::PgPool,
         insert: Erc20PendingDepositInsert,
@@ -99,5 +110,70 @@ impl Erc20PendingDeposit {
         .fetch_one(pool)
         .await?;
         Ok(deposit)
+    }
+
+    /// Get pending deposits for matching with transfers.
+    pub async fn get_for_matching(
+        pool: &sqlx::PgPool,
+        chain: EtherScanChain,
+        token: StablecoinName,
+    ) -> Result<Vec<Erc20PendingDepositMatch>, sqlx::Error> {
+        let deposits = sqlx::query_as!(
+            Erc20PendingDepositMatch,
+            r#"
+            SELECT 
+                d.id,
+                d."order" as order_id,
+                d.wallet_address,
+                d.value,
+                EXTRACT(EPOCH FROM d.started_at)::bigint as "started_at_timestamp!"
+            FROM erc20_pending_deposits d
+            JOIN order_records o ON d."order" = o.order_id
+            WHERE d.chain = $1 
+              AND d.token_name = $2
+              AND o.status = 'pending'
+            "#,
+            chain as EtherScanChain,
+            token as StablecoinName,
+        )
+        .fetch_all(pool)
+        .await?;
+        Ok(deposits)
+    }
+
+    /// Delete pending deposits for an order except for one (the matched one), within a transaction.
+    pub async fn delete_for_order_except_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        order_id: uuid::Uuid,
+        except_id: i64,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query!(
+            r#"
+            DELETE FROM erc20_pending_deposits
+            WHERE "order" = $1 AND id != $2
+            "#,
+            order_id,
+            except_id,
+        )
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
+    /// Delete all pending deposits for an order within a transaction.
+    pub async fn delete_for_order_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        order_id: uuid::Uuid,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query!(
+            r#"
+            DELETE FROM erc20_pending_deposits
+            WHERE "order" = $1
+            "#,
+            order_id,
+        )
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
     }
 }

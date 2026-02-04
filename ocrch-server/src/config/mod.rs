@@ -12,10 +12,11 @@ use crate::config::file::{
 use crate::config::runtime::{
     AdminConfig, MerchantConfig, ServerConfig, SharedConfig, WalletConfig,
 };
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::RwLock;
 
 /// Errors that can occur during configuration loading.
 #[derive(Debug, Error)]
@@ -43,14 +44,19 @@ pub enum ConfigError {
 pub struct LoadedConfig {
     pub server: ServerConfig,
     pub admin: AdminConfig,
-    pub merchants: HashMap<String, MerchantConfig>,
+    pub merchant: MerchantConfig,
     pub wallets: Vec<WalletConfig>,
 }
 
 impl LoadedConfig {
     /// Convert into a SharedConfig with Arc<RwLock<T>> wrappers.
     pub fn into_shared(self) -> SharedConfig {
-        SharedConfig::new(self.server, self.admin, self.merchants, self.wallets)
+        SharedConfig{
+            server: Arc::new(RwLock::new(self.server)),
+            admin: Arc::new(RwLock::new(self.admin)),
+            merchant: Arc::new(RwLock::new(self.merchant)),
+            wallets: Arc::new(RwLock::new(self.wallets)),
+        }
     }
 }
 
@@ -114,17 +120,6 @@ impl ConfigLoader {
     }
 
     fn validate(&self, config: &FileConfig) -> Result<(), ConfigError> {
-        // Check for duplicate merchant IDs
-        let mut merchant_ids = std::collections::HashSet::new();
-        for merchant in &config.merchants {
-            if !merchant_ids.insert(&merchant.id) {
-                return Err(ConfigError::ValidationError(format!(
-                    "duplicate merchant ID: {}",
-                    merchant.id
-                )));
-            }
-        }
-
         // Check that wallets have at least one enabled coin
         for wallet in &config.wallets {
             if wallet.enabled_coins.is_empty() {
@@ -134,7 +129,6 @@ impl ConfigLoader {
                 )));
             }
         }
-
         Ok(())
     }
 
@@ -165,12 +159,6 @@ impl ConfigLoader {
     }
 
     fn build_loaded_config(&self, file_config: FileConfig, secret_hash: String) -> LoadedConfig {
-        let merchants: HashMap<String, MerchantConfig> = file_config
-            .merchants
-            .into_iter()
-            .map(|m| (m.id.clone(), convert_merchant(m)))
-            .collect();
-
         let wallets: Vec<WalletConfig> = file_config
             .wallets
             .into_iter()
@@ -182,20 +170,19 @@ impl ConfigLoader {
                 listen: file_config.server.listen,
             },
             admin: AdminConfig::new(secret_hash),
-            merchants,
+            merchant: file_config.merchant,
             wallets,
         }
     }
 }
 
 fn convert_merchant(m: FileMerchantConfig) -> MerchantConfig {
-    MerchantConfig::new(
-        m.id,
-        m.name,
-        m.secret.into_bytes().into_boxed_slice(),
-        m.webhook_url,
-        m.allowed_origins,
-    )
+    MerchantConfig {
+        name: m.name,
+        secret: m.secret.into_bytes().into_boxed_slice(),
+        allowed_origins: m.allowed_origins,
+        
+    }
 }
 
 fn convert_wallet(w: FileWalletConfig) -> WalletConfig {
