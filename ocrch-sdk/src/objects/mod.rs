@@ -2,6 +2,9 @@ pub mod blockchains;
 pub mod create_payment;
 pub mod webhook;
 
+pub use blockchains::{Blockchain, Stablecoin};
+pub use webhook::{OrderStatus, OrderStatusChangedPayload, TransferStatus, UnknownTransferPayload};
+
 pub trait Signature: for<'de> serde::Deserialize<'de> + serde::Serialize {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]

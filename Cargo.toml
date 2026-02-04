@@ -58,4 +58,6 @@ smallvec = { version = "1.14.0", features = [
 # Security
 rand = "0.9"
 ring = { version = "0.17", features = ["std"] }
-sha2 = "0.10"
+
+# Async traits
+async-trait = "0.1"

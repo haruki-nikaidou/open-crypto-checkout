@@ -13,7 +13,7 @@ pub struct Erc20PendingDeposit {
     pub last_scanned_at: time::PrimitiveDateTime,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, sqlx::Type)]
 #[sqlx(rename_all = "lowercase", type_name = "etherscan_chain")]
 /// https://docs.etherscan.io/supported-chains
 pub enum EtherScanChain {

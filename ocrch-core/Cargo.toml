@@ -14,4 +14,8 @@ uuid = { workspace = true }
 rust_decimal = { workspace = true }
 time = { workspace = true }
 url = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "macros"] }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { workspace = true }
 
