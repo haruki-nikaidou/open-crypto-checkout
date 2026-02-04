@@ -8,10 +8,10 @@
 //!
 //! Each enabled token on each blockchain has its own BlockchainSync instance.
 
+use crate::entities::StablecoinName;
 use crate::entities::erc20_pending_deposit::EtherScanChain;
 use crate::entities::erc20_transfer::{Erc20TokenTransfer, Erc20TransferInsert};
 use crate::entities::trc20_transfer::{Trc20TokenTransfer, Trc20TransferInsert};
-use crate::entities::StablecoinName;
 use crate::events::{BlockchainTarget, MatchTick, MatchTickSender, PoolingTickReceiver};
 use async_trait::async_trait;
 use sqlx::PgPool;
@@ -41,6 +41,10 @@ pub enum SyncError {
     /// API returned an error
     #[error("API error: {message}")]
     ApiError { message: String },
+
+    /// Token not supported
+    #[error("token not supported")]
+    UnsupportedToken
 }
 
 /// Trait for blockchain sync implementations.
@@ -68,84 +72,51 @@ pub struct Erc20BlockchainSync {
     chain: EtherScanChain,
     token: StablecoinName,
     wallet_address: String,
-    contract_address: String,
     api_key: String,
-    api_base_url: String,
     http_client: reqwest::Client,
 }
 
 impl Erc20BlockchainSync {
-    /// Create a new Erc20BlockchainSync.
-    ///
-    /// # Arguments
-    ///
-    /// * `chain` - The EtherScan-compatible chain
-    /// * `token` - The stablecoin to track
-    /// * `wallet_address` - The wallet address to monitor for incoming transfers
-    /// * `contract_address` - The token contract address
-    /// * `api_key` - EtherScan API key
-    pub fn new(
-        chain: EtherScanChain,
-        token: StablecoinName,
-        wallet_address: String,
-        contract_address: String,
-        api_key: String,
-    ) -> Self {
-        let api_base_url = Self::get_api_base_url(chain);
-        Self {
-            chain,
-            token,
-            wallet_address,
-            contract_address,
-            api_key,
-            api_base_url,
-            http_client: reqwest::Client::new(),
-        }
-    }
-
-    /// Get the API base URL for the given chain.
-    fn get_api_base_url(chain: EtherScanChain) -> String {
-        match chain {
-            EtherScanChain::Ethereum => "https://api.etherscan.io/api".to_string(),
-            EtherScanChain::Polygon => "https://api.polygonscan.com/api".to_string(),
-            EtherScanChain::Base => "https://api.basescan.org/api".to_string(),
-            EtherScanChain::ArbitrumOne => "https://api.arbiscan.io/api".to_string(),
-            EtherScanChain::Linea => "https://api.lineascan.build/api".to_string(),
-            EtherScanChain::Optimism => "https://api-optimistic.etherscan.io/api".to_string(),
-            EtherScanChain::AvalancheC => "https://api.snowtrace.io/api".to_string(),
-        }
-    }
+    const ETHERSCAN_API_URL: &str = "https://api.etherscan.io/v2/api";
 
     /// Fetch transfers from the EtherScan API.
-    async fn fetch_transfers(&self, start_block: i64) -> Result<Vec<Erc20TransferData>, SyncError> {
-        let url = format!(
-            "{}?module=account&action=tokentx&contractaddress={}&address={}&startblock={}&endblock=999999999&sort=asc&apikey={}",
-            self.api_base_url,
-            self.contract_address,
-            self.wallet_address,
-            start_block,
-            self.api_key
-        );
-
-        let response = self.http_client.get(&url).send().await?;
-
-        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(SyncError::RateLimited { retry_after_secs: 5 });
+    async fn fetch_transfers(&self, start_block: i64) -> Result<Vec<Erc20TokenTransferResponseItem>, SyncError> {
+        #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+        struct EtherScanResponse<T> {
+            status: String,
+            message: String,
+            result: T,
         }
 
-        let response_json: EtherScanResponse = response.json().await?;
-
-        if response_json.status != "1" {
-            // Status "0" with "No transactions found" is not an error
-            if response_json.message.contains("No transactions found") {
-                return Ok(Vec::new());
-            }
+        let Some(contract_address) = self.token.get_data().get_contract_address(self.chain.into()) else {
+            return Err(SyncError::UnsupportedToken)
+        };
+        let chain_id = self.chain as i32;
+        let response = self
+            .http_client
+            .get(Self::ETHERSCAN_API_URL)
+            .query(&[
+                ("apiKey", self.api_key.as_str()),
+                ("chainid", chain_id.to_string().as_str()),
+                ("module", "account"),
+                ("action", "tokentx"),
+                ("contractaddress", contract_address),
+                ("address", self.wallet_address.as_str()),
+                ("startblock", start_block.to_string().as_str()),
+                ("page", "1"),
+                ("offset", "100"),
+                ("sort", "asc"),
+            ])
+            .send()
+            .await?;
+        let response: EtherScanResponse<Vec<Erc20TokenTransferResponseItem>> =
+            response.json().await?;
+        if response.status != "1" {
             return Err(SyncError::ApiError {
-                message: response_json.message,
+                message: response.message,
             });
         }
-
-        Ok(response_json.result)
+        Ok(response.result)
     }
 
     /// Get the last synced block number from the database.
@@ -282,18 +253,21 @@ impl Trc20BlockchainSync {
     }
 
     /// Fetch transfers from the TronScan API.
-    async fn fetch_transfers(&self, start_timestamp: i64) -> Result<Vec<Trc20TransferData>, SyncError> {
+    async fn fetch_transfers(
+        &self,
+        start_timestamp: i64,
+    ) -> Result<Vec<Trc20TransferData>, SyncError> {
         let url = format!(
             "https://apilist.tronscanapi.com/api/filter/trc20/transfers?limit=200&contract_address={}&toAddress={}&start_timestamp={}",
-            self.contract_address,
-            self.wallet_address,
-            start_timestamp
+            self.contract_address, self.wallet_address, start_timestamp
         );
 
         let response = self.http_client.get(&url).send().await?;
 
         if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(SyncError::RateLimited { retry_after_secs: 5 });
+            return Err(SyncError::RateLimited {
+                retry_after_secs: 5,
+            });
         }
 
         let response_json: TronScanResponse = response.json().await?;
@@ -532,25 +506,15 @@ impl<S: BlockchainSync + 'static> BlockchainSyncRunner<S> {
     }
 }
 
-// API response types for EtherScan
-#[derive(Debug, serde::Deserialize)]
-struct EtherScanResponse {
-    status: String,
-    message: String,
-    #[serde(default)]
-    result: Vec<Erc20TransferData>,
-}
-
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Erc20TransferData {
-    block_number: String,
-    time_stamp: String,
-    hash: String,
-    from: String,
-    to: String,
-    value: String,
-    token_decimal: String,
+pub struct Erc20TokenTransferResponseItem {
+    pub block_number: String,
+    pub time_stamp: String,
+    pub from: String,
+    pub to: String,
+    pub value: String,
+    pub token_decimal: String,
 }
 
 // API response types for TronScan

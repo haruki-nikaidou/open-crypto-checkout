@@ -26,6 +26,20 @@ pub enum EtherScanChain {
     AvalancheC = 43114,
 }
 
+impl From<EtherScanChain> for ocrch_sdk::objects::blockchains::Blockchain {
+    fn from(value: EtherScanChain) -> Self {
+        match value {
+            EtherScanChain::Ethereum => ocrch_sdk::objects::blockchains::Blockchain::Ethereum,
+            EtherScanChain::Polygon => ocrch_sdk::objects::blockchains::Blockchain::Polygon,
+            EtherScanChain::Base => ocrch_sdk::objects::blockchains::Blockchain::Base,
+            EtherScanChain::ArbitrumOne => ocrch_sdk::objects::blockchains::Blockchain::ArbitrumOne,
+            EtherScanChain::Linea => ocrch_sdk::objects::blockchains::Blockchain::Linea,
+            EtherScanChain::Optimism => ocrch_sdk::objects::blockchains::Blockchain::Optimism,
+            EtherScanChain::AvalancheC => ocrch_sdk::objects::blockchains::Blockchain::AvalancheC,
+        }
+    }
+}
+
 impl serde::Serialize for EtherScanChain {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

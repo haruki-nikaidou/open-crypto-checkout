@@ -35,8 +35,8 @@ pub type WebhookEventReceiver = mpsc::Receiver<WebhookEvent>;
 ///
 /// Returns a (sender, receiver) pair for PendingDepositChanged events.
 /// Multiple senders can be cloned from the returned sender.
-pub fn pending_deposit_changed_channel() -> (PendingDepositChangedSender, PendingDepositChangedReceiver)
-{
+pub fn pending_deposit_changed_channel()
+-> (PendingDepositChangedSender, PendingDepositChangedReceiver) {
     mpsc::channel(DEFAULT_CHANNEL_BUFFER)
 }
 
@@ -74,19 +74,4 @@ pub struct EventSenders {
     pub match_tick: MatchTickSender,
     /// Sender for WebhookEvent events
     pub webhook_event: WebhookEventSender,
-}
-
-impl EventSenders {
-    /// Create a new EventSenders container.
-    pub fn new(
-        pending_deposit_changed: PendingDepositChangedSender,
-        match_tick: MatchTickSender,
-        webhook_event: WebhookEventSender,
-    ) -> Self {
-        Self {
-            pending_deposit_changed,
-            match_tick,
-            webhook_event,
-        }
-    }
 }
