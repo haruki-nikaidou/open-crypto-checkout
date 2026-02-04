@@ -3,6 +3,6 @@
 //! The actual config types are defined in `ocrch-sdk::config`.
 //! This module re-exports them for convenience.
 
-pub use ocrch_sdk::config::{
+pub use ocrch_core::config::{
     AdminConfig, MerchantConfig, ServerConfig, SharedConfig, WalletConfig,
 };

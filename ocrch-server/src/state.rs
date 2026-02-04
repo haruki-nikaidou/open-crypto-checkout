@@ -1,6 +1,6 @@
 //! Application state shared across all request handlers.
 
-use ocrch_sdk::config::SharedConfig;
+use ocrch_core::config::SharedConfig;
 use sqlx::PgPool;
 
 /// Application state that is shared across all request handlers.

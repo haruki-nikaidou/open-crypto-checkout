@@ -1,6 +1,6 @@
 //! Wallet configuration.
 
-use crate::objects::blockchains::{Blockchain, Stablecoin};
+use ocrch_sdk::objects::blockchains::{Blockchain, Stablecoin};
 
 /// Wallet configuration for receiving payments.
 #[derive(Debug, Clone)]

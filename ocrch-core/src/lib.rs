@@ -7,3 +7,4 @@ pub mod entities;
 pub mod events;
 pub mod processors;
 pub mod utils;
+pub mod config;
