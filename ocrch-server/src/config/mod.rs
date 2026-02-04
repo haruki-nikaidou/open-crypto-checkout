@@ -89,35 +89,6 @@ impl ConfigLoader {
         Ok(self.build_runtime_config(file_config, secret_hash))
     }
 
-    /// Reload only the reloadable parts of the configuration.
-    ///
-    /// Returns a new RuntimeConfig, but note that database URL changes
-    /// require a full restart.
-    pub fn reload(&self) -> Result<RuntimeConfig, ConfigError> {
-        let config_content = std::fs::read_to_string(&self.config_path)?;
-        let mut file_config: FileConfig = toml::from_str(&config_content)?;
-
-        // Apply CLI overrides (these should persist across reloads)
-        if let Some(listen) = self.listen_override {
-            file_config.server.listen = listen;
-        }
-
-        self.validate(&file_config)?;
-
-        // Hash admin secret if needed (same logic as load())
-        let secret_hash = if file_config.is_admin_secret_hashed() {
-            file_config.admin.secret.clone()
-        } else {
-            let hash = self.hash_secret(&file_config.admin.secret)?;
-            file_config.admin.secret = hash.clone();
-            self.rewrite_config(&file_config)?;
-            tracing::info!("Admin secret hashed and config file updated during reload");
-            hash
-        };
-
-        Ok(self.build_runtime_config(file_config, secret_hash))
-    }
-
     fn validate(&self, config: &FileConfig) -> Result<(), ConfigError> {
         // Check for duplicate merchant IDs
         let mut merchant_ids = std::collections::HashSet::new();

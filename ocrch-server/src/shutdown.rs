@@ -42,7 +42,7 @@ pub fn spawn_config_reload_handler(
             tokio::select! {
                 _ = sighup.recv() => {
                     tracing::info!("Received SIGHUP, reloading configuration");
-                    match config_loader.reload() {
+                    match config_loader.load() {
                         Ok(new_config) => {
                             state.update_config(new_config).await;
                             tracing::info!("Configuration reloaded successfully");
