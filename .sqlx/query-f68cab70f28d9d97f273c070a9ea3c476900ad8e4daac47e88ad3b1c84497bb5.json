@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE order_records\n            SET webhook_success_at = NOW()\n            WHERE order_id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f68cab70f28d9d97f273c070a9ea3c476900ad8e4daac47e88ad3b1c84497bb5"
+}

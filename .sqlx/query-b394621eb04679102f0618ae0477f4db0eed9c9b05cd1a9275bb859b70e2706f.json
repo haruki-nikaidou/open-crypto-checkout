@@ -1,0 +1,73 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT \n                d.id,\n                d.\"order\" as order_id,\n                d.wallet_address,\n                d.value,\n                EXTRACT(EPOCH FROM d.started_at)::bigint as \"started_at_timestamp!\"\n            FROM erc20_pending_deposits d\n            JOIN order_records o ON d.\"order\" = o.order_id\n            WHERE d.chain = $1 \n              AND d.token_name = $2\n              AND o.status = 'pending'\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "order_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "wallet_address",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "value",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 4,
+        "name": "started_at_timestamp!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        {
+          "Custom": {
+            "name": "etherscan_chain",
+            "kind": {
+              "Enum": [
+                "ethereum",
+                "polygon",
+                "base",
+                "arbitrum_one",
+                "linea",
+                "optimism",
+                "avalanche_c"
+              ]
+            }
+          }
+        },
+        {
+          "Custom": {
+            "name": "stablecoin_name",
+            "kind": {
+              "Enum": [
+                "usdt",
+                "usdc",
+                "dai"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "b394621eb04679102f0618ae0477f4db0eed9c9b05cd1a9275bb859b70e2706f"
+}

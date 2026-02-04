@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO erc20_token_transfers \n            (token_name, chain, from_address, to_address, txn_hash, value, block_number, block_timestamp)\n            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n            ON CONFLICT (txn_hash, chain) DO NOTHING\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        {
+          "Custom": {
+            "name": "stablecoin_name",
+            "kind": {
+              "Enum": [
+                "usdt",
+                "usdc",
+                "dai"
+              ]
+            }
+          }
+        },
+        {
+          "Custom": {
+            "name": "etherscan_chain",
+            "kind": {
+              "Enum": [
+                "ethereum",
+                "polygon",
+                "base",
+                "arbitrum_one",
+                "linea",
+                "optimism",
+                "avalanche_c"
+              ]
+            }
+          }
+        },
+        "Text",
+        "Text",
+        "Text",
+        "Numeric",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "74c85e6beeb116e0d22164e9a816f84621815c1792c82174c74511c1d0d26d8b"
+}

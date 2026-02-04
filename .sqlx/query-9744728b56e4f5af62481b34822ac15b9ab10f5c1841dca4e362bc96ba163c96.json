@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM trc20_pending_deposits\n            WHERE \"order\" = $1 AND id != $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9744728b56e4f5af62481b34822ac15b9ab10f5c1841dca4e362bc96ba163c96"
+}

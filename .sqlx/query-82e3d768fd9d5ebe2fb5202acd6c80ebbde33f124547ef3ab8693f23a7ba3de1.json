@@ -1,0 +1,127 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO erc20_pending_deposits (\"order\", token_name, chain, user_address, wallet_address, value)\n            VALUES ($1, $2, $3, $4, $5, $6)\n            RETURNING \n            id,\n            \"order\",\n            token_name as \"token_name: StablecoinName\",\n            chain as \"chain: EtherScanChain\",\n            user_address,\n            wallet_address,\n            value,\n            started_at,\n            last_scanned_at\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "order",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "token_name: StablecoinName",
+        "type_info": {
+          "Custom": {
+            "name": "stablecoin_name",
+            "kind": {
+              "Enum": [
+                "usdt",
+                "usdc",
+                "dai"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "chain: EtherScanChain",
+        "type_info": {
+          "Custom": {
+            "name": "etherscan_chain",
+            "kind": {
+              "Enum": [
+                "ethereum",
+                "polygon",
+                "base",
+                "arbitrum_one",
+                "linea",
+                "optimism",
+                "avalanche_c"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "user_address",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "wallet_address",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "value",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 7,
+        "name": "started_at",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 8,
+        "name": "last_scanned_at",
+        "type_info": "Timestamp"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        {
+          "Custom": {
+            "name": "stablecoin_name",
+            "kind": {
+              "Enum": [
+                "usdt",
+                "usdc",
+                "dai"
+              ]
+            }
+          }
+        },
+        {
+          "Custom": {
+            "name": "etherscan_chain",
+            "kind": {
+              "Enum": [
+                "ethereum",
+                "polygon",
+                "base",
+                "arbitrum_one",
+                "linea",
+                "optimism",
+                "avalanche_c"
+              ]
+            }
+          }
+        },
+        "Text",
+        "Text",
+        "Numeric"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "82e3d768fd9d5ebe2fb5202acd6c80ebbde33f124547ef3ab8693f23a7ba3de1"
+}

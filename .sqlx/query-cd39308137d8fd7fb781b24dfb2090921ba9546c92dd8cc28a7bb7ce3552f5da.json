@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE trc20_token_transfers\n            SET status = 'matched', fulfillment_id = $1\n            WHERE id = $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cd39308137d8fd7fb781b24dfb2090921ba9546c92dd8cc28a7bb7ce3552f5da"
+}
