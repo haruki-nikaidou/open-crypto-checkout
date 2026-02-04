@@ -131,61 +131,31 @@ impl Erc20BlockchainSync {
     async fn insert_transfers(
         &self,
         pool: &PgPool,
-        transfers: Vec<Erc20TransferData>,
+        transfers: Vec<Erc20TokenTransferResponseItem>,
     ) -> Result<u32, SyncError> {
         if transfers.is_empty() {
             return Ok(0);
         }
 
-        let mut inserted = 0u32;
+        let ctx = Erc20TransferConversionContext {
+            chain: self.chain,
+            token: self.token,
+        };
 
-        for transfer in transfers {
-            // Only process incoming transfers to our wallet
-            if transfer.to.to_lowercase() != self.wallet_address.to_lowercase() {
-                continue;
-            }
+        // Filter incoming transfers to our wallet and convert to insert structs
+        let wallet_address_lower = self.wallet_address.to_lowercase();
+        let inserts: Vec<Erc20TransferInsert> = transfers
+            .into_iter()
+            .filter(|t| t.to.to_lowercase() == wallet_address_lower)
+            .map(|t| Erc20TransferInsert::try_from((t, &ctx)))
+            .collect::<Result<Vec<_>, _>>()?;
 
-            let block_number: i64 = transfer
-                .block_number
-                .parse()
-                .map_err(|e| SyncError::Parse(format!("Invalid block number: {}", e)))?;
-
-            let block_timestamp: i64 = transfer
-                .time_stamp
-                .parse()
-                .map_err(|e| SyncError::Parse(format!("Invalid timestamp: {}", e)))?;
-
-            let value: rust_decimal::Decimal = transfer
-                .value
-                .parse()
-                .map_err(|e| SyncError::Parse(format!("Invalid value: {}", e)))?;
-
-            // Adjust for token decimals (most stablecoins use 6 or 18 decimals)
-            let decimals: u32 = transfer
-                .token_decimal
-                .parse()
-                .map_err(|e| SyncError::Parse(format!("Invalid decimals: {}", e)))?;
-
-            let divisor = rust_decimal::Decimal::from(10u64.pow(decimals));
-            let normalized_value = value / divisor;
-
-            let transfer_insert = Erc20TransferInsert {
-                token_name: self.token,
-                chain: self.chain,
-                from_address: transfer.from,
-                to_address: transfer.to,
-                txn_hash: transfer.hash,
-                value: normalized_value,
-                block_number,
-                block_timestamp,
-            };
-
-            if Erc20TokenTransfer::insert(pool, &transfer_insert).await? {
-                inserted += 1;
-            }
+        if inserts.is_empty() {
+            return Ok(0);
         }
 
-        Ok(inserted)
+        let inserted = Erc20TokenTransfer::insert_many(pool, &inserts).await?;
+        Ok(inserted as u32)
     }
 }
 
@@ -511,10 +481,59 @@ impl<S: BlockchainSync + 'static> BlockchainSyncRunner<S> {
 pub struct Erc20TokenTransferResponseItem {
     pub block_number: String,
     pub time_stamp: String,
+    pub hash: String,
     pub from: String,
     pub to: String,
     pub value: String,
     pub token_decimal: String,
+}
+
+/// Context for converting API response items to database insert structs.
+pub struct Erc20TransferConversionContext {
+    pub chain: EtherScanChain,
+    pub token: StablecoinName,
+}
+
+impl TryFrom<(Erc20TokenTransferResponseItem, &Erc20TransferConversionContext)> for Erc20TransferInsert {
+    type Error = SyncError;
+
+    fn try_from(
+        (item, ctx): (Erc20TokenTransferResponseItem, &Erc20TransferConversionContext),
+    ) -> Result<Self, Self::Error> {
+        let block_number: i64 = item
+            .block_number
+            .parse()
+            .map_err(|e| SyncError::Parse(format!("Invalid block number: {}", e)))?;
+
+        let block_timestamp: i64 = item
+            .time_stamp
+            .parse()
+            .map_err(|e| SyncError::Parse(format!("Invalid timestamp: {}", e)))?;
+
+        let value: rust_decimal::Decimal = item
+            .value
+            .parse()
+            .map_err(|e| SyncError::Parse(format!("Invalid value: {}", e)))?;
+
+        let decimals: u32 = item
+            .token_decimal
+            .parse()
+            .map_err(|e| SyncError::Parse(format!("Invalid decimals: {}", e)))?;
+
+        let divisor = rust_decimal::Decimal::from(10u64.pow(decimals));
+        let normalized_value = value / divisor;
+
+        Ok(Erc20TransferInsert {
+            token_name: ctx.token,
+            chain: ctx.chain,
+            from_address: item.from,
+            to_address: item.to,
+            txn_hash: item.hash,
+            value: normalized_value,
+            block_number,
+            block_timestamp,
+        })
+    }
 }
 
 // API response types for TronScan

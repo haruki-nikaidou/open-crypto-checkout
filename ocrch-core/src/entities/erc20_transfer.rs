@@ -123,6 +123,40 @@ impl Erc20TokenTransfer {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Insert multiple transfers in a single query.
+    ///
+    /// Uses QueryBuilder for efficient bulk insert with ON CONFLICT DO NOTHING.
+    /// Returns the number of rows actually inserted (excluding duplicates).
+    pub async fn insert_many(
+        pool: &sqlx::PgPool,
+        transfers: &[Erc20TransferInsert],
+    ) -> Result<u64, sqlx::Error> {
+        if transfers.is_empty() {
+            return Ok(0);
+        }
+
+        let mut query_builder = sqlx::QueryBuilder::new(
+            "INSERT INTO erc20_token_transfers \
+            (token_name, chain, from_address, to_address, txn_hash, value, block_number, block_timestamp) ",
+        );
+
+        query_builder.push_values(transfers, |mut b, transfer| {
+            b.push_bind(transfer.token_name as StablecoinName)
+                .push_bind(transfer.chain as EtherScanChain)
+                .push_bind(&transfer.from_address)
+                .push_bind(&transfer.to_address)
+                .push_bind(&transfer.txn_hash)
+                .push_bind(transfer.value)
+                .push_bind(transfer.block_number)
+                .push_bind(transfer.block_timestamp);
+        });
+
+        query_builder.push(" ON CONFLICT (txn_hash, chain) DO NOTHING");
+
+        let result = query_builder.build().execute(pool).await?;
+        Ok(result.rows_affected())
+    }
+
     /// Get unmatched transfers that are waiting for a deposit match.
     pub async fn get_unmatched(
         pool: &sqlx::PgPool,
