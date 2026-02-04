@@ -1,1 +1,1 @@
-mod pooling_interval;
+pub mod pooling_interval;
