@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["ocrch-core", "ocrch-sdk"]
+members = ["ocrch-core", "ocrch-sdk", "ocrch-server"]
 
 [workspace.dependencies]
 # Runtime
