@@ -1,0 +1,79 @@
+# Open Crypto Checkout Configuration
+#
+# Copy this file to `ocrch-config.toml` and customize for your deployment.
+# The server reads the database URL from the DATABASE_URL environment variable.
+
+[server]
+# The address and port to listen on.
+# Can be overridden with the --listen CLI flag.
+listen = "0.0.0.0:8080"
+
+[admin]
+# Admin API secret for the dashboard.
+# 
+# IMPORTANT: On first run, if this is plaintext (doesn't start with "$argon2"),
+# the server will automatically hash it using Argon2 and rewrite this file.
+# 
+# You can set a plaintext password here and let the server hash it, or
+# pre-generate an Argon2 hash using a tool like `argon2`.
+secret = "change-me-to-a-secure-password"
+
+# Merchant configurations
+# Each merchant represents an application that can create checkout orders.
+[[merchants]]
+# Unique identifier for this merchant (used in API calls)
+id = "merchant_example"
+# Human-readable name
+name = "Example Store"
+# Secret key for signing API requests (HMAC-SHA256)
+# Keep this secure and share only with the merchant's backend.
+secret = "your-merchant-secret-key-here"
+# URL to send webhook notifications (order status changes, etc.)
+webhook_url = "https://your-app.example.com/webhooks/ocrch"
+# Allowed origins for CORS (frontend checkout URLs)
+allowed_origins = [
+    "https://checkout.your-app.example.com",
+    "http://localhost:3000"  # For local development
+]
+
+# Wallet configurations
+# Each wallet is an address that can receive payments.
+# You should use dedicated wallets for this service.
+
+# Ethereum mainnet wallet
+[[wallets]]
+blockchain = "eth"
+address = "0xYourEthereumWalletAddress"
+enabled_coins = ["USDT", "USDC"]
+
+# Polygon wallet
+[[wallets]]
+blockchain = "polygon"
+address = "0xYourPolygonWalletAddress"
+enabled_coins = ["USDT", "USDC"]
+
+# Arbitrum One wallet
+[[wallets]]
+blockchain = "arb"
+address = "0xYourArbitrumWalletAddress"
+enabled_coins = ["USDT", "USDC"]
+
+# Base wallet
+[[wallets]]
+blockchain = "base"
+address = "0xYourBaseWalletAddress"
+enabled_coins = ["USDC"]
+
+# Tron wallet
+[[wallets]]
+blockchain = "tron"
+address = "TYourTronWalletAddress"
+enabled_coins = ["USDT"]
+
+# Additional blockchain options:
+# - "linea" - Linea mainnet
+# - "op" - Optimism
+# - "avaxc" - Avalanche C-Chain
+#
+# Supported stablecoins: "USDT", "USDC", "DAI"
+# Note: Not all coins are available on all chains.

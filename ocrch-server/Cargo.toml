@@ -4,3 +4,31 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+ocrch-core = { path = "../ocrch-core" }
+ocrch-sdk = { path = "../ocrch-sdk" }
+
+# Runtime
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+
+# Framework
+axum = { workspace = true }
+tower = { workspace = true }
+sqlx = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+toml = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Security
+argon2 = "0.5"
+rand = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
