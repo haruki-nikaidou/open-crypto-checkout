@@ -18,18 +18,14 @@ listen = "0.0.0.0:8080"
 # pre-generate an Argon2 hash using a tool like `argon2`.
 secret = "change-me-to-a-secure-password"
 
-# Merchant configurations
-# Each merchant represents an application that can create checkout orders.
-[[merchants]]
-# Unique identifier for this merchant (used in API calls)
-id = "merchant_example"
+# Merchant configuration
+# The merchant represents the application that creates checkout orders.
+[merchant]
 # Human-readable name
 name = "Example Store"
 # Secret key for signing API requests (HMAC-SHA256)
-# Keep this secure and share only with the merchant's backend.
+# Keep this secure and share only with your backend.
 secret = "your-merchant-secret-key-here"
-# URL to send webhook notifications (order status changes, etc.)
-webhook_url = "https://your-app.example.com/webhooks/ocrch"
 # Allowed origins for CORS (frontend checkout URLs)
 allowed_origins = [
     "https://checkout.your-app.example.com",

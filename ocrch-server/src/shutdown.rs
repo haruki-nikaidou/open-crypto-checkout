@@ -43,12 +43,10 @@ pub fn spawn_config_reload_handler(
                     match config_loader.reload() {
                         Ok(loaded_config) => {
                             // Update all config sections
-                            state.config.update_all(
-                                loaded_config.server,
-                                loaded_config.admin,
-                                loaded_config.merchants,
-                                loaded_config.wallets,
-                            ).await;
+                            *state.config.server.write().await = loaded_config.server;
+                            *state.config.admin.write().await = loaded_config.admin;
+                            *state.config.merchant.write().await = loaded_config.merchant;
+                            *state.config.wallets.write().await = loaded_config.wallets;
                             tracing::info!("Configuration reloaded successfully");
                         }
                         Err(e) => {

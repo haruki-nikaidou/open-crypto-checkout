@@ -62,8 +62,6 @@ impl WebhookSender {
     /// * `pool` - Database connection pool
     /// * `webhook_rx` - Receiver for WebhookEvent events
     /// * `shutdown_rx` - Receiver for shutdown signal
-    ///   Takes `(payload: &[u8], merchant_id: &str)` and returns `Option<String>`.
-    ///   The signature implementation should be in `ocrch-sdk::signature`.
     pub fn new(
         pool: PgPool,
         webhook_rx: WebhookEventReceiver,

@@ -79,10 +79,9 @@ listen = "127.0.0.1:3000"
 [admin]
 secret = "test-secret"
 
-[merchants]
+[merchant]
 name = "Test Store"
 secret = "secret123"
-webhook_url = "https://example.com/webhook"
 allowed_origins = ["https://checkout.example.com"]
 
 [[wallets]]

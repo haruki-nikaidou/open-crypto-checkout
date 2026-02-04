@@ -170,19 +170,14 @@ impl ConfigLoader {
                 listen: file_config.server.listen,
             },
             admin: AdminConfig::new(secret_hash),
-            merchant: file_config.merchant,
+            merchant: convert_merchant(file_config.merchant),
             wallets,
         }
     }
 }
 
 fn convert_merchant(m: FileMerchantConfig) -> MerchantConfig {
-    MerchantConfig {
-        name: m.name,
-        secret: m.secret.into_bytes().into_boxed_slice(),
-        allowed_origins: m.allowed_origins,
-        
-    }
+    MerchantConfig::new(m.name, m.secret.into_bytes().into_boxed_slice(), m.allowed_origins)
 }
 
 fn convert_wallet(w: FileWalletConfig) -> WalletConfig {

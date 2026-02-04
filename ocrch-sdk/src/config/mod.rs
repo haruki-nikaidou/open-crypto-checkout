@@ -14,7 +14,6 @@ pub use merchant::MerchantConfig;
 pub use server::ServerConfig;
 pub use wallet::WalletConfig;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
