@@ -4,6 +4,7 @@ use uuid::Uuid;
 pub struct OrderRecord {
     pub order_id: Uuid,
     pub merchant_order_id: String,
+    pub amount: rust_decimal::Decimal,
     pub created_at: time::PrimitiveDateTime,
     pub status: OrderStatus,
     pub webhook_success_at: Option<time::PrimitiveDateTime>,

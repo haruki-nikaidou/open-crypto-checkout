@@ -25,6 +25,7 @@ CREATE TYPE etherscan_chain AS ENUM (
 CREATE TABLE order_records (
     order_id UUID PRIMARY KEY,
     merchant_order_id TEXT NOT NULL,
+    amount NUMERIC NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     status order_status NOT NULL DEFAULT 'pending',
     webhook_success_at TIMESTAMP,
