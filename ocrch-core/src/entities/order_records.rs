@@ -13,6 +13,7 @@ pub struct OrderRecord {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, sqlx::Type)]
+#[sqlx(rename_all = "lowercase", type_name = "order_status")]
 pub enum OrderStatus {
     Pending,
     Paid,
