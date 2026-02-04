@@ -1187,9 +1187,11 @@ name = "ocrch-sdk"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argon2",
  "bytes",
  "compact_str",
  "fast32",
+ "rand 0.9.2",
  "ring",
  "rust_decimal",
  "serde",

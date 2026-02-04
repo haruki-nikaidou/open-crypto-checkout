@@ -3,4 +3,5 @@
 #![deny(clippy::panic)]
 #![forbid(unsafe_code)]
 
+pub mod config;
 pub mod objects;

@@ -8,7 +8,7 @@ mod shutdown;
 mod state;
 
 use clap::Parser;
-use config::{get_database_url, ConfigLoader};
+use config::{ConfigLoader, get_database_url};
 use server::{build_router, run_server};
 use shutdown::spawn_config_reload_handler;
 use sqlx::postgres::PgPoolOptions;
@@ -16,7 +16,7 @@ use state::AppState;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Open Crypto Checkout - Headless cryptocurrency payment gateway
 #[derive(Parser, Debug)]
@@ -44,20 +44,20 @@ async fn main() -> anyhow::Result<()> {
     // Parse command line arguments
     let args = Args::parse();
 
-    tracing::info!(
-        "Starting ocrch-server v{}",
-        env!("CARGO_PKG_VERSION")
-    );
+    tracing::info!("Starting ocrch-server v{}", env!("CARGO_PKG_VERSION"));
 
     // Load configuration
     let config_loader = Arc::new(ConfigLoader::new(&args.config, args.listen));
-    let runtime_config = config_loader.load().map_err(|e| {
+    let loaded_config = config_loader.load().map_err(|e| {
         tracing::error!("Failed to load configuration: {}", e);
         e
     })?;
 
-    let listen_addr = runtime_config.server.listen;
+    let listen_addr = loaded_config.server.listen;
     tracing::info!("Configuration loaded from {:?}", args.config);
+
+    // Convert to shared config with separate locks for each section
+    let shared_config = loaded_config.into_shared();
 
     // Get database URL from environment
     let database_url = get_database_url().map_err(|e| {
@@ -91,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Create application state
-    let state = AppState::new(db_pool.clone(), runtime_config);
+    let state = AppState::new(db_pool.clone(), shared_config);
 
     // Spawn config reload handler (listens for SIGHUP)
     let shutdown_notify = spawn_config_reload_handler(state.clone(), config_loader);

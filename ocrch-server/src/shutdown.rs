@@ -3,17 +3,15 @@
 use crate::config::ConfigLoader;
 use crate::state::AppState;
 use std::sync::Arc;
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Notify;
 
 /// Creates a future that completes when a shutdown signal is received.
 ///
 /// Listens for SIGTERM and SIGINT (Ctrl+C).
 pub async fn shutdown_signal() {
-    let mut sigterm =
-        signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
-    let mut sigint =
-        signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+    let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+    let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
 
     tokio::select! {
         _ = sigterm.recv() => {
@@ -42,9 +40,15 @@ pub fn spawn_config_reload_handler(
             tokio::select! {
                 _ = sighup.recv() => {
                     tracing::info!("Received SIGHUP, reloading configuration");
-                    match config_loader.load() {
-                        Ok(new_config) => {
-                            state.update_config(new_config).await;
+                    match config_loader.reload() {
+                        Ok(loaded_config) => {
+                            // Update all config sections
+                            state.config.update_all(
+                                loaded_config.server,
+                                loaded_config.admin,
+                                loaded_config.merchants,
+                                loaded_config.wallets,
+                            ).await;
                             tracing::info!("Configuration reloaded successfully");
                         }
                         Err(e) => {

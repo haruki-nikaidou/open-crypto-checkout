@@ -6,10 +6,11 @@
 pub mod file;
 pub mod runtime;
 
-use crate::config::file::{FileConfig, MerchantConfig, WalletConfig};
+use crate::config::file::{
+    FileConfig, MerchantConfig as FileMerchantConfig, WalletConfig as FileWalletConfig,
+};
 use crate::config::runtime::{
-    RuntimeAdminConfig, RuntimeConfig, RuntimeMerchantConfig, RuntimeServerConfig,
-    RuntimeWalletConfig,
+    AdminConfig, MerchantConfig, ServerConfig, SharedConfig, WalletConfig,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -38,6 +39,21 @@ pub enum ConfigError {
     MissingDatabaseUrl,
 }
 
+/// Loaded configuration result containing all parts.
+pub struct LoadedConfig {
+    pub server: ServerConfig,
+    pub admin: AdminConfig,
+    pub merchants: HashMap<String, MerchantConfig>,
+    pub wallets: Vec<WalletConfig>,
+}
+
+impl LoadedConfig {
+    /// Convert into a SharedConfig with Arc<RwLock<T>> wrappers.
+    pub fn into_shared(self) -> SharedConfig {
+        SharedConfig::new(self.server, self.admin, self.merchants, self.wallets)
+    }
+}
+
 /// Configuration loader that handles the complete loading process.
 pub struct ConfigLoader {
     config_path: std::path::PathBuf,
@@ -60,8 +76,8 @@ impl ConfigLoader {
     /// 2. Apply CLI overrides
     /// 3. Validate the configuration
     /// 4. Hash the admin secret if it's plaintext (and rewrite the file)
-    /// 5. Build the runtime configuration
-    pub fn load(&self) -> Result<RuntimeConfig, ConfigError> {
+    /// 5. Build the loaded configuration
+    pub fn load(&self) -> Result<LoadedConfig, ConfigError> {
         // Read the config file
         let config_content = std::fs::read_to_string(&self.config_path)?;
         let mut file_config: FileConfig = toml::from_str(&config_content)?;
@@ -85,8 +101,16 @@ impl ConfigLoader {
             hash
         };
 
-        // Build runtime config
-        Ok(self.build_runtime_config(file_config, secret_hash))
+        // Build the config parts
+        Ok(self.build_loaded_config(file_config, secret_hash))
+    }
+
+    /// Reload the configuration (used during SIGHUP).
+    ///
+    /// Returns a LoadedConfig that can be used to update individual parts
+    /// of a SharedConfig.
+    pub fn reload(&self) -> Result<LoadedConfig, ConfigError> {
+        self.load()
     }
 
     fn validate(&self, config: &FileConfig) -> Result<(), ConfigError> {
@@ -116,8 +140,8 @@ impl ConfigLoader {
 
     fn hash_secret(&self, plaintext: &str) -> Result<String, ConfigError> {
         use argon2::{
-            password_hash::{rand_core::OsRng, SaltString},
             Argon2, PasswordHasher,
+            password_hash::{SaltString, rand_core::OsRng},
         };
 
         let salt = SaltString::generate(&mut OsRng);
@@ -140,51 +164,42 @@ impl ConfigLoader {
         Ok(())
     }
 
-    fn build_runtime_config(&self, file_config: FileConfig, secret_hash: String) -> RuntimeConfig {
-        let merchants: HashMap<String, RuntimeMerchantConfig> = file_config
+    fn build_loaded_config(&self, file_config: FileConfig, secret_hash: String) -> LoadedConfig {
+        let merchants: HashMap<String, MerchantConfig> = file_config
             .merchants
             .into_iter()
-            .map(|m| {
-                (
-                    m.id.clone(),
-                    convert_merchant(m),
-                )
-            })
+            .map(|m| (m.id.clone(), convert_merchant(m)))
             .collect();
 
-        let wallets: Vec<RuntimeWalletConfig> = file_config
+        let wallets: Vec<WalletConfig> = file_config
             .wallets
             .into_iter()
             .map(convert_wallet)
             .collect();
 
-        RuntimeConfig {
-            server: RuntimeServerConfig {
+        LoadedConfig {
+            server: ServerConfig {
                 listen: file_config.server.listen,
             },
-            admin: RuntimeAdminConfig { secret_hash },
+            admin: AdminConfig::new(secret_hash),
             merchants,
             wallets,
         }
     }
 }
 
-fn convert_merchant(m: MerchantConfig) -> RuntimeMerchantConfig {
-    RuntimeMerchantConfig {
-        id: m.id,
-        name: m.name,
-        secret: m.secret.into_bytes().into_boxed_slice(),
-        webhook_url: m.webhook_url,
-        allowed_origins: m.allowed_origins,
-    }
+fn convert_merchant(m: FileMerchantConfig) -> MerchantConfig {
+    MerchantConfig::new(
+        m.id,
+        m.name,
+        m.secret.into_bytes().into_boxed_slice(),
+        m.webhook_url,
+        m.allowed_origins,
+    )
 }
 
-fn convert_wallet(w: WalletConfig) -> RuntimeWalletConfig {
-    RuntimeWalletConfig {
-        blockchain: w.blockchain,
-        address: w.address,
-        enabled_coins: w.enabled_coins,
-    }
+fn convert_wallet(w: FileWalletConfig) -> WalletConfig {
+    WalletConfig::new(w.blockchain, w.address, w.enabled_coins)
 }
 
 /// Get the database URL from the environment.
