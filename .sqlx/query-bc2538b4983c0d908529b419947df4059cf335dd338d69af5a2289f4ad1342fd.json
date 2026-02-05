@@ -1,0 +1,56 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                token_name as \"token_name: StablecoinName\",\n                cursor_block_timestamp as \"cursor_block_timestamp!\",\n                has_pending_confirmation as \"has_pending_confirmation!\"\n            FROM trc20_sync_cursor\n            WHERE token_name = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "token_name: StablecoinName",
+        "type_info": {
+          "Custom": {
+            "name": "stablecoin_name",
+            "kind": {
+              "Enum": [
+                "usdt",
+                "usdc",
+                "dai"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "cursor_block_timestamp!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "has_pending_confirmation!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        {
+          "Custom": {
+            "name": "stablecoin_name",
+            "kind": {
+              "Enum": [
+                "usdt",
+                "usdc",
+                "dai"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "bc2538b4983c0d908529b419947df4059cf335dd338d69af5a2289f4ad1342fd"
+}

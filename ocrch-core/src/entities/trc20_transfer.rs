@@ -38,53 +38,46 @@ pub struct Trc20UnmatchedTransfer {
     pub block_timestamp: i64,
 }
 
+/// Sync cursor from the trc20_sync_cursor materialized view.
+/// Contains the timestamp to start syncing from.
+#[derive(Debug, Clone)]
+pub struct Trc20SyncCursor {
+    pub token_name: StablecoinName,
+    /// The timestamp (in milliseconds) to start syncing from.
+    /// This is either:
+    /// - The earliest timestamp of unconfirmed transfers within the last 1 day, or
+    /// - The latest timestamp if all recent transfers are confirmed.
+    pub cursor_block_timestamp: i64,
+    /// Whether there are unconfirmed transfers within the last 1 day.
+    pub has_pending_confirmation: bool,
+}
+
 impl Trc20TokenTransfer {
-    /// Get the cursor (latest transfer) for a token.
+    /// Get the sync cursor from the materialized view for a token.
+    ///
+    /// The cursor implements the algorithm:
+    /// 1. If there are unconfirmed transfers within the last 1 day, return the earliest timestamp
+    /// 2. Otherwise, return the latest timestamp
+    /// 3. If no transfers exist, return None
     pub async fn cursor(
         pool: &sqlx::PgPool,
         token_name: StablecoinName,
-    ) -> Result<Option<Self>, sqlx::Error> {
-        let transfer = sqlx::query_as!(
-            Self,
+    ) -> Result<Option<Trc20SyncCursor>, sqlx::Error> {
+        let cursor = sqlx::query_as!(
+            Trc20SyncCursor,
             r#"
             SELECT
-            id,
-            token_name as "token_name: StablecoinName",
-            from_address,
-            to_address,
-            txn_hash,
-            value,
-            block_number,
-            block_timestamp,
-            blockchain_confirmed,
-            created_at,
-            status as "status: TransferStatus",
-            fulfillment_id
-            FROM trc20_token_transfers WHERE token_name = $1
+                token_name as "token_name!: StablecoinName",
+                cursor_block_timestamp as "cursor_block_timestamp!",
+                has_pending_confirmation as "has_pending_confirmation!"
+            FROM trc20_sync_cursor
+            WHERE token_name = $1
             "#,
             token_name as StablecoinName,
         )
         .fetch_optional(pool)
         .await?;
-        Ok(transfer)
-    }
-
-    /// Get the last synced timestamp for a token.
-    pub async fn get_last_timestamp(
-        pool: &sqlx::PgPool,
-        token: StablecoinName,
-    ) -> Result<i64, sqlx::Error> {
-        let result = sqlx::query_scalar!(
-            r#"
-            SELECT COALESCE(MAX(block_timestamp), 0) as "block_timestamp!"
-            FROM trc20_token_transfers
-            WHERE token_name = $1
-            "#,
-            token as StablecoinName,
-        )
-        .fetch_one(pool)
-        .await?;
-        Ok(result)
+        Ok(cursor)
     }
 
     /// Insert a new transfer. Returns true if a new row was inserted (not a duplicate).

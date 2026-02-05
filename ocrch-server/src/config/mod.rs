@@ -51,7 +51,7 @@ pub struct LoadedConfig {
 impl LoadedConfig {
     /// Convert into a SharedConfig with Arc<RwLock<T>> wrappers.
     pub fn into_shared(self) -> SharedConfig {
-        SharedConfig{
+        SharedConfig {
             server: Arc::new(RwLock::new(self.server)),
             admin: Arc::new(RwLock::new(self.admin)),
             merchant: Arc::new(RwLock::new(self.merchant)),
@@ -177,11 +177,20 @@ impl ConfigLoader {
 }
 
 fn convert_merchant(m: FileMerchantConfig) -> MerchantConfig {
-    MerchantConfig::new(m.name, m.secret.into_bytes().into_boxed_slice(), m.allowed_origins)
+    MerchantConfig::new(
+        m.name,
+        m.secret.into_bytes().into_boxed_slice(),
+        m.allowed_origins,
+    )
 }
 
 fn convert_wallet(w: FileWalletConfig) -> WalletConfig {
-    WalletConfig::new(w.blockchain, w.address, w.enabled_coins)
+    WalletConfig {
+        blockchain: w.blockchain,
+        address: w.address,
+        enabled_coins: w.enabled_coins,
+        starting_tx: w.starting_tx,
+    }
 }
 
 /// Get the database URL from the environment.

@@ -8,12 +8,14 @@
 //! - Updating transfer status to `Matched` and linking `fulfillment_id`
 //! - Emitting `WebhookEvent::OrderStatusChanged` for successful matches
 
-use crate::entities::erc20_pending_deposit::{Erc20PendingDeposit, Erc20PendingDepositMatch, EtherScanChain};
+use crate::entities::StablecoinName;
+use crate::entities::erc20_pending_deposit::{
+    Erc20PendingDeposit, Erc20PendingDepositMatch, EtherScanChain,
+};
 use crate::entities::erc20_transfer::{Erc20TokenTransfer, Erc20UnmatchedTransfer};
 use crate::entities::order_records::{OrderRecord, OrderStatus};
 use crate::entities::trc20_pending_deposit::{Trc20PendingDeposit, Trc20PendingDepositMatch};
 use crate::entities::trc20_transfer::{Trc20TokenTransfer, Trc20UnmatchedTransfer};
-use crate::entities::StablecoinName;
 use crate::events::{
     BlockchainTarget, MatchTick, MatchTickReceiver, WebhookEvent, WebhookEventSender,
 };
@@ -176,12 +178,8 @@ impl OrderBookWatcher {
     /// Process a MatchTick event.
     async fn process_match_tick(&self, tick: &MatchTick) -> Result<(), MatchError> {
         match tick.blockchain {
-            BlockchainTarget::Erc20(chain) => {
-                self.match_erc20_transfers(chain, tick.token).await
-            }
-            BlockchainTarget::Trc20 => {
-                self.match_trc20_transfers(tick.token).await
-            }
+            BlockchainTarget::Erc20(chain) => self.match_erc20_transfers(chain, tick.token).await,
+            BlockchainTarget::Trc20 => self.match_trc20_transfers(tick.token).await,
         }
     }
 
@@ -461,7 +459,8 @@ impl OrderBookWatcher {
     ) -> Result<(), MatchError> {
         // Find transfers that have been waiting too long and mark as no_matched_deposit
         // These are transfers older than 1 hour that haven't been matched
-        let old_transfers = Erc20TokenTransfer::get_old_unmatched_ids(&self.pool, chain, token).await?;
+        let old_transfers =
+            Erc20TokenTransfer::get_old_unmatched_ids(&self.pool, chain, token).await?;
 
         for transfer_id in old_transfers {
             // Update status

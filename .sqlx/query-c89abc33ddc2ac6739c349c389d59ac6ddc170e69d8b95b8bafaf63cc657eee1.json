@@ -1,0 +1,93 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                chain as \"chain: EtherScanChain\",\n                token_name as \"token_name: StablecoinName\",\n                cursor_block_number as \"cursor_block_number!\",\n                has_pending_confirmation as \"has_pending_confirmation!\"\n            FROM erc20_sync_cursor\n            WHERE chain = $1 AND token_name = $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "chain: EtherScanChain",
+        "type_info": {
+          "Custom": {
+            "name": "etherscan_chain",
+            "kind": {
+              "Enum": [
+                "ethereum",
+                "polygon",
+                "base",
+                "arbitrum_one",
+                "linea",
+                "optimism",
+                "avalanche_c"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "token_name: StablecoinName",
+        "type_info": {
+          "Custom": {
+            "name": "stablecoin_name",
+            "kind": {
+              "Enum": [
+                "usdt",
+                "usdc",
+                "dai"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "cursor_block_number!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "has_pending_confirmation!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        {
+          "Custom": {
+            "name": "etherscan_chain",
+            "kind": {
+              "Enum": [
+                "ethereum",
+                "polygon",
+                "base",
+                "arbitrum_one",
+                "linea",
+                "optimism",
+                "avalanche_c"
+              ]
+            }
+          }
+        },
+        {
+          "Custom": {
+            "name": "stablecoin_name",
+            "kind": {
+              "Enum": [
+                "usdt",
+                "usdc",
+                "dai"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "c89abc33ddc2ac6739c349c389d59ac6ddc170e69d8b95b8bafaf63cc657eee1"
+}

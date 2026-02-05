@@ -5,7 +5,6 @@ pub mod trc20_pending_deposit;
 pub mod trc20_transfer;
 
 use ocrch_sdk::objects::{Stablecoin as SdkStablecoin, TransferStatus as SdkTransferStatus};
-use ocrch_sdk::objects::blockchains::StablecoinData;
 
 /// Stablecoin name for database operations.
 ///
@@ -16,13 +15,6 @@ pub enum StablecoinName {
     Usdt,
     Usdc,
     Dai,
-}
-
-impl StablecoinName {
-    pub fn get_data(&self) -> StablecoinData {
-        let sdk_coin: SdkStablecoin = self.clone().into();
-        sdk_coin.get_data()
-    }
 }
 
 impl From<StablecoinName> for SdkStablecoin {

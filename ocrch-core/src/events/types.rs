@@ -4,9 +4,9 @@
 //! identifiers rather than full data, requiring processors to fetch
 //! current state from the database.
 
+use crate::entities::StablecoinName;
 use crate::entities::erc20_pending_deposit::EtherScanChain;
 use crate::entities::order_records::OrderStatus;
-use crate::entities::StablecoinName;
 use uuid::Uuid;
 
 /// Unified blockchain target for event routing.

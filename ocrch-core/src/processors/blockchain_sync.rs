@@ -44,7 +44,7 @@ pub enum SyncError {
 
     /// Token not supported
     #[error("token not supported")]
-    UnsupportedToken
+    UnsupportedToken,
 }
 
 /// Trait for blockchain sync implementations.
@@ -74,13 +74,44 @@ pub struct Erc20BlockchainSync {
     wallet_address: String,
     api_key: String,
     http_client: reqwest::Client,
+    /// Optional starting transaction hash for initial sync fallback.
+    starting_tx: Option<String>,
 }
 
 impl Erc20BlockchainSync {
     const ETHERSCAN_API_URL: &str = "https://api.etherscan.io/v2/api";
 
+    /// Create a new Erc20BlockchainSync.
+    ///
+    /// # Arguments
+    ///
+    /// * `chain` - The EVM chain to sync from
+    /// * `token` - The stablecoin to track
+    /// * `wallet_address` - The wallet address to monitor for incoming transfers
+    /// * `api_key` - The EtherScan API key
+    /// * `starting_tx` - Optional starting transaction hash for initial sync fallback
+    pub fn new(
+        chain: EtherScanChain,
+        token: StablecoinName,
+        wallet_address: String,
+        api_key: String,
+        starting_tx: Option<String>,
+    ) -> Self {
+        Self {
+            chain,
+            token,
+            wallet_address,
+            api_key,
+            http_client: reqwest::Client::new(),
+            starting_tx,
+        }
+    }
+
     /// Fetch transfers from the EtherScan API.
-    async fn fetch_transfers(&self, start_block: i64) -> Result<Vec<Erc20TokenTransferResponseItem>, SyncError> {
+    async fn fetch_transfers(
+        &self,
+        start_block: i64,
+    ) -> Result<Vec<Erc20TokenTransferResponseItem>, SyncError> {
         #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
         struct EtherScanResponse<T> {
             status: String,
@@ -88,8 +119,10 @@ impl Erc20BlockchainSync {
             result: T,
         }
 
-        let Some(contract_address) = self.token.get_data().get_contract_address(self.chain.into()) else {
-            return Err(SyncError::UnsupportedToken)
+        let sdk_token: ocrch_sdk::objects::Stablecoin = self.token.into();
+        let Some(contract_address) = sdk_token.get_data().get_contract_address(self.chain.into())
+        else {
+            return Err(SyncError::UnsupportedToken);
         };
         let chain_id = self.chain as i32;
         let response = self
@@ -119,10 +152,80 @@ impl Erc20BlockchainSync {
         Ok(response.result)
     }
 
-    /// Get the last synced block number from the database.
-    async fn get_last_block(&self, pool: &PgPool) -> Result<i64, SyncError> {
-        let result = Erc20TokenTransfer::get_last_block(pool, self.chain, self.token).await?;
-        Ok(result)
+    /// Get the cursor block number from the materialized view.
+    ///
+    /// The cursor implements the algorithm:
+    /// 1. If there are unconfirmed transfers within the last 1 day, return the earliest block number
+    /// 2. Otherwise, return the latest block number
+    /// 3. If no transfers exist, return None
+    async fn get_cursor_block(&self, pool: &PgPool) -> Result<Option<i64>, SyncError> {
+        let cursor = Erc20TokenTransfer::cursor(pool, self.chain, self.token).await?;
+        Ok(cursor.map(|c| c.cursor_block_number))
+    }
+
+    /// Fetch the block number of a transaction from the EtherScan API.
+    async fn fetch_tx_block_number(&self, tx_hash: &str) -> Result<i64, SyncError> {
+        #[derive(Debug, serde::Deserialize)]
+        struct EtherScanResponse<T> {
+            status: String,
+            message: String,
+            result: T,
+        }
+
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct TxInfo {
+            block_number: String,
+        }
+
+        let chain_id = self.chain as i32;
+        let response = self
+            .http_client
+            .get(Self::ETHERSCAN_API_URL)
+            .query(&[
+                ("apiKey", self.api_key.as_str()),
+                ("chainid", chain_id.to_string().as_str()),
+                ("module", "proxy"),
+                ("action", "eth_getTransactionByHash"),
+                ("txhash", tx_hash),
+            ])
+            .send()
+            .await?;
+
+        let response: EtherScanResponse<Option<TxInfo>> = response.json().await?;
+
+        let tx_info = response.result.ok_or_else(|| SyncError::ApiError {
+            message: format!("Transaction {} not found", tx_hash),
+        })?;
+
+        // Block number from eth_getTransactionByHash is hex-encoded
+        let block_number = i64::from_str_radix(tx_info.block_number.trim_start_matches("0x"), 16)
+            .map_err(|e| SyncError::Parse(format!("Invalid block number: {}", e)))?;
+
+        Ok(block_number)
+    }
+
+    /// Get the starting block for sync, considering database cursor and starting_tx fallback.
+    async fn get_start_block(&self, pool: &PgPool) -> Result<i64, SyncError> {
+        // First, check if we have a cursor from the materialized view
+        if let Some(cursor_block) = self.get_cursor_block(pool).await? {
+            return Ok(cursor_block);
+        }
+
+        // No transfers yet - check if we have a starting_tx fallback
+        if let Some(ref tx_hash) = self.starting_tx {
+            info!(
+                chain = ?self.chain,
+                token = ?self.token,
+                tx_hash = %tx_hash,
+                "No transfers found, using starting_tx as fallback"
+            );
+            let block_number = self.fetch_tx_block_number(tx_hash).await?;
+            return Ok(block_number);
+        }
+
+        // No cursor and no starting_tx - start from the beginning
+        Ok(0)
     }
 
     /// Insert transfers into the database.
@@ -162,8 +265,7 @@ impl Erc20BlockchainSync {
 #[async_trait]
 impl BlockchainSync for Erc20BlockchainSync {
     async fn sync(&self, pool: &PgPool) -> Result<u32, SyncError> {
-        let last_block = self.get_last_block(pool).await?;
-        let start_block = if last_block > 0 { last_block } else { 0 };
+        let start_block = self.get_start_block(pool).await?;
 
         debug!(
             chain = ?self.chain,
@@ -203,6 +305,8 @@ pub struct Trc20BlockchainSync {
     wallet_address: String,
     contract_address: String,
     http_client: reqwest::Client,
+    /// Optional starting transaction hash for initial sync fallback.
+    starting_tx: Option<String>,
 }
 
 impl Trc20BlockchainSync {
@@ -213,12 +317,19 @@ impl Trc20BlockchainSync {
     /// * `token` - The stablecoin to track
     /// * `wallet_address` - The wallet address to monitor for incoming transfers
     /// * `contract_address` - The token contract address
-    pub fn new(token: StablecoinName, wallet_address: String, contract_address: String) -> Self {
+    /// * `starting_tx` - Optional starting transaction hash for initial sync fallback
+    pub fn new(
+        token: StablecoinName,
+        wallet_address: String,
+        contract_address: String,
+        starting_tx: Option<String>,
+    ) -> Self {
         Self {
             token,
             wallet_address,
             contract_address,
             http_client: reqwest::Client::new(),
+            starting_tx,
         }
     }
 
@@ -245,10 +356,69 @@ impl Trc20BlockchainSync {
         Ok(response_json.token_transfers)
     }
 
-    /// Get the last synced timestamp from the database.
-    async fn get_last_timestamp(&self, pool: &PgPool) -> Result<i64, SyncError> {
-        let result = Trc20TokenTransfer::get_last_timestamp(pool, self.token).await?;
-        Ok(result)
+    /// Get the cursor timestamp from the materialized view.
+    ///
+    /// The cursor implements the algorithm:
+    /// 1. If there are unconfirmed transfers within the last 1 day, return the earliest timestamp
+    /// 2. Otherwise, return the latest timestamp
+    /// 3. If no transfers exist, return None
+    async fn get_cursor_timestamp(&self, pool: &PgPool) -> Result<Option<i64>, SyncError> {
+        let cursor = Trc20TokenTransfer::cursor(pool, self.token).await?;
+        Ok(cursor.map(|c| c.cursor_block_timestamp))
+    }
+
+    /// Fetch the timestamp of a transaction from the TronScan API.
+    async fn fetch_tx_timestamp(&self, tx_hash: &str) -> Result<i64, SyncError> {
+        #[derive(Debug, serde::Deserialize)]
+        struct TronScanTxResponse {
+            #[serde(default)]
+            timestamp: i64,
+        }
+
+        let url = format!(
+            "https://apilist.tronscanapi.com/api/transaction-info?hash={}",
+            tx_hash
+        );
+
+        let response = self.http_client.get(&url).send().await?;
+
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(SyncError::RateLimited {
+                retry_after_secs: 5,
+            });
+        }
+
+        let tx_info: TronScanTxResponse = response.json().await?;
+
+        if tx_info.timestamp == 0 {
+            return Err(SyncError::ApiError {
+                message: format!("Transaction {} not found or has no timestamp", tx_hash),
+            });
+        }
+
+        Ok(tx_info.timestamp)
+    }
+
+    /// Get the starting timestamp for sync, considering database cursor and starting_tx fallback.
+    async fn get_start_timestamp(&self, pool: &PgPool) -> Result<i64, SyncError> {
+        // First, check if we have a cursor from the materialized view
+        if let Some(cursor_timestamp) = self.get_cursor_timestamp(pool).await? {
+            return Ok(cursor_timestamp);
+        }
+
+        // No transfers yet - check if we have a starting_tx fallback
+        if let Some(ref tx_hash) = self.starting_tx {
+            info!(
+                token = ?self.token,
+                tx_hash = %tx_hash,
+                "No transfers found, using starting_tx as fallback"
+            );
+            let timestamp = self.fetch_tx_timestamp(tx_hash).await?;
+            return Ok(timestamp);
+        }
+
+        // No cursor and no starting_tx - start from the beginning
+        Ok(0)
     }
 
     /// Insert transfers into the database.
@@ -302,12 +472,7 @@ impl Trc20BlockchainSync {
 #[async_trait]
 impl BlockchainSync for Trc20BlockchainSync {
     async fn sync(&self, pool: &PgPool) -> Result<u32, SyncError> {
-        let last_timestamp = self.get_last_timestamp(pool).await?;
-        let start_timestamp = if last_timestamp > 0 {
-            last_timestamp
-        } else {
-            0
-        };
+        let start_timestamp = self.get_start_timestamp(pool).await?;
 
         debug!(
             token = ?self.token,
@@ -494,11 +659,19 @@ pub struct Erc20TransferConversionContext {
     pub token: StablecoinName,
 }
 
-impl TryFrom<(Erc20TokenTransferResponseItem, &Erc20TransferConversionContext)> for Erc20TransferInsert {
+impl
+    TryFrom<(
+        Erc20TokenTransferResponseItem,
+        &Erc20TransferConversionContext,
+    )> for Erc20TransferInsert
+{
     type Error = SyncError;
 
     fn try_from(
-        (item, ctx): (Erc20TokenTransferResponseItem, &Erc20TransferConversionContext),
+        (item, ctx): (
+            Erc20TokenTransferResponseItem,
+            &Erc20TransferConversionContext,
+        ),
     ) -> Result<Self, Self::Error> {
         let block_number: i64 = item
             .block_number

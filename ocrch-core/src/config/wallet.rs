@@ -11,20 +11,8 @@ pub struct WalletConfig {
     pub address: String,
     /// List of stablecoins enabled for this wallet.
     pub enabled_coins: Vec<Stablecoin>,
-}
-
-impl WalletConfig {
-    /// Create a new WalletConfig.
-    pub fn new(blockchain: Blockchain, address: String, enabled_coins: Vec<Stablecoin>) -> Self {
-        Self {
-            blockchain,
-            address,
-            enabled_coins,
-        }
-    }
-
-    /// Check if a stablecoin is enabled for this wallet.
-    pub fn is_coin_enabled(&self, coin: Stablecoin) -> bool {
-        self.enabled_coins.contains(&coin)
-    }
+    /// Optional starting transaction hash for initial sync.
+    /// When no transfers exist in the database, sync will start from this
+    /// transaction's block (ERC-20) or timestamp (TRC-20) instead of from the beginning.
+    pub starting_tx: Option<String>,
 }

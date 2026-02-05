@@ -13,11 +13,7 @@ pub struct MerchantConfig {
 
 impl MerchantConfig {
     /// Create a new MerchantConfig.
-    pub fn new(
-        name: String,
-        secret: impl Into<Box<[u8]>>,
-        allowed_origins: Vec<String>,
-    ) -> Self {
+    pub fn new(name: String, secret: impl Into<Box<[u8]>>, allowed_origins: Vec<String>) -> Self {
         Self {
             name,
             secret: secret.into(),

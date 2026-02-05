@@ -41,6 +41,10 @@ allowed_origins = [
 blockchain = "eth"
 address = "0xYourEthereumWalletAddress"
 enabled_coins = ["USDT", "USDC"]
+# Optional: Starting transaction hash for initial sync.
+# When no transfers exist in the database, sync will start from this
+# transaction's block instead of from the beginning.
+# starting_tx = "0x..."
 
 # Polygon wallet
 [[wallets]]
@@ -65,6 +69,10 @@ enabled_coins = ["USDC"]
 blockchain = "tron"
 address = "TYourTronWalletAddress"
 enabled_coins = ["USDT"]
+# Optional: Starting transaction hash for initial sync.
+# When no transfers exist in the database, sync will start from this
+# transaction's timestamp instead of from the beginning.
+# starting_tx = "..."
 
 # Additional blockchain options:
 # - "linea" - Linea mainnet

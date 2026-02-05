@@ -41,58 +41,50 @@ pub struct Erc20UnmatchedTransfer {
     pub block_timestamp: i64,
 }
 
+/// Sync cursor from the erc20_sync_cursor materialized view.
+/// Contains the block number to start syncing from.
+#[derive(Debug, Clone)]
+pub struct Erc20SyncCursor {
+    pub chain: EtherScanChain,
+    pub token_name: StablecoinName,
+    /// The block number to start syncing from.
+    /// This is either:
+    /// - The earliest block of unconfirmed transfers within the last 1 day, or
+    /// - The latest block number if all recent transfers are confirmed.
+    pub cursor_block_number: i64,
+    /// Whether there are unconfirmed transfers within the last 1 day.
+    pub has_pending_confirmation: bool,
+}
+
 impl Erc20TokenTransfer {
-    /// Get the cursor (latest transfer) for a chain-token pair.
+    /// Get the sync cursor from the materialized view for a chain-token pair.
+    ///
+    /// The cursor implements the algorithm:
+    /// 1. If there are unconfirmed transfers within the last 1 day, return the earliest block number
+    /// 2. Otherwise, return the latest block number
+    /// 3. If no transfers exist, return None
     pub async fn cursor(
         pool: &sqlx::PgPool,
         chain: EtherScanChain,
         token_name: StablecoinName,
-    ) -> Result<Option<Self>, sqlx::Error> {
-        let transfer = sqlx::query_as!(
-            Self,
+    ) -> Result<Option<Erc20SyncCursor>, sqlx::Error> {
+        let cursor = sqlx::query_as!(
+            Erc20SyncCursor,
             r#"
             SELECT
-            id,
-            token_name as "token_name: StablecoinName",
-            chain as "chain: EtherScanChain",
-            from_address,
-            to_address,
-            txn_hash,
-            value,
-            block_number,
-            block_timestamp,
-            blockchain_confirmed,
-            created_at,
-            status as "status: TransferStatus",
-            fulfillment_id
-            FROM erc20_token_transfers WHERE chain = $1 AND token_name = $2
+                chain as "chain!: EtherScanChain",
+                token_name as "token_name!: StablecoinName",
+                cursor_block_number as "cursor_block_number!",
+                has_pending_confirmation as "has_pending_confirmation!"
+            FROM erc20_sync_cursor
+            WHERE chain = $1 AND token_name = $2
             "#,
             chain as EtherScanChain,
             token_name as StablecoinName,
         )
         .fetch_optional(pool)
         .await?;
-        Ok(transfer)
-    }
-
-    /// Get the last synced block number for a chain-token pair.
-    pub async fn get_last_block(
-        pool: &sqlx::PgPool,
-        chain: EtherScanChain,
-        token: StablecoinName,
-    ) -> Result<i64, sqlx::Error> {
-        let result = sqlx::query_scalar!(
-            r#"
-            SELECT COALESCE(MAX(block_number), 0) as "block_number!"
-            FROM erc20_token_transfers
-            WHERE chain = $1 AND token_name = $2
-            "#,
-            chain as EtherScanChain,
-            token as StablecoinName,
-        )
-        .fetch_one(pool)
-        .await?;
-        Ok(result)
+        Ok(cursor)
     }
 
     /// Insert a new transfer. Returns true if a new row was inserted (not a duplicate).

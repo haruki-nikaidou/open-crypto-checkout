@@ -17,10 +17,10 @@ pub mod channels;
 pub mod types;
 
 pub use channels::{
-    match_tick_channel, pending_deposit_changed_channel, pooling_tick_channel,
-    webhook_event_channel, EventSenders, MatchTickReceiver, MatchTickSender,
+    DEFAULT_CHANNEL_BUFFER, EventSenders, MatchTickReceiver, MatchTickSender,
     PendingDepositChangedReceiver, PendingDepositChangedSender, PoolingTickReceiver,
-    PoolingTickSender, WebhookEventReceiver, WebhookEventSender, DEFAULT_CHANNEL_BUFFER,
+    PoolingTickSender, WebhookEventReceiver, WebhookEventSender, match_tick_channel,
+    pending_deposit_changed_channel, pooling_tick_channel, webhook_event_channel,
 };
 
 pub use types::{BlockchainTarget, MatchTick, PendingDepositChanged, PoolingTick, WebhookEvent};

@@ -3,8 +3,8 @@
 #![deny(clippy::panic)]
 #![forbid(unsafe_code)]
 
+pub mod config;
 pub mod entities;
 pub mod events;
 pub mod processors;
 pub mod utils;
-pub mod config;
