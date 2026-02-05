@@ -14,7 +14,6 @@ use crate::entities::erc20_transfer::{Erc20TokenTransfer, Erc20TransferInsert};
 use crate::entities::trc20_transfer::{Trc20TokenTransfer, Trc20TransferInsert};
 use crate::events::{BlockchainTarget, MatchTick, MatchTickSender, PoolingTickReceiver};
 use async_trait::async_trait;
-use reqwest::header::HeaderMap;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use thiserror::Error;
@@ -229,18 +228,47 @@ impl Erc20BlockchainSync {
             return Ok(0);
         }
 
-        let ctx = Erc20TransferConversionContext {
-            chain: self.chain,
-            token: self.token,
-        };
-
         // Filter incoming transfers to our wallet and convert to insert structs
         let wallet_address_lower = self.wallet_address.to_lowercase();
         let inserts: Vec<Erc20TransferInsert> = transfers
             .into_iter()
             .filter(|t| t.to.to_lowercase() == wallet_address_lower)
-            .map(|t| Erc20TransferInsert::try_from((t, &ctx)))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|t| {
+                let block_number: i64 = t
+                    .block_number
+                    .parse()
+                    .map_err(|e| SyncError::Parse(format!("Invalid block number: {}", e)))?;
+
+                let block_timestamp: i64 = t
+                    .time_stamp
+                    .parse()
+                    .map_err(|e| SyncError::Parse(format!("Invalid timestamp: {}", e)))?;
+
+                let value: Decimal = t
+                    .value
+                    .parse()
+                    .map_err(|e| SyncError::Parse(format!("Invalid value: {}", e)))?;
+
+                let decimals: u32 = t
+                    .token_decimal
+                    .parse()
+                    .map_err(|e| SyncError::Parse(format!("Invalid decimals: {}", e)))?;
+
+                let divisor = Decimal::from(10u64.pow(decimals));
+                let normalized_value = value / divisor;
+
+                Ok(Erc20TransferInsert {
+                    token_name: self.token,
+                    chain: self.chain,
+                    from_address: t.from,
+                    to_address: t.to,
+                    txn_hash: t.hash,
+                    value: normalized_value,
+                    block_number,
+                    block_timestamp,
+                })
+            })
+            .collect::<Result<Vec<_>, SyncError>>()?;
 
         if inserts.is_empty() {
             return Ok(0);
@@ -697,62 +725,6 @@ struct EtherScanProxyResponse<T> {
     jsonrpc: String,
     id: u32,
     result: T,
-}
-
-/// Context for converting API response items to database insert structs.
-pub struct Erc20TransferConversionContext {
-    pub chain: EtherScanChain,
-    pub token: StablecoinName,
-}
-
-impl
-    TryFrom<(
-        Erc20TokenTransferResponseItem,
-        &Erc20TransferConversionContext,
-    )> for Erc20TransferInsert
-{
-    type Error = SyncError;
-
-    fn try_from(
-        (item, ctx): (
-            Erc20TokenTransferResponseItem,
-            &Erc20TransferConversionContext,
-        ),
-    ) -> Result<Self, Self::Error> {
-        let block_number: i64 = item
-            .block_number
-            .parse()
-            .map_err(|e| SyncError::Parse(format!("Invalid block number: {}", e)))?;
-
-        let block_timestamp: i64 = item
-            .time_stamp
-            .parse()
-            .map_err(|e| SyncError::Parse(format!("Invalid timestamp: {}", e)))?;
-
-        let value: rust_decimal::Decimal = item
-            .value
-            .parse()
-            .map_err(|e| SyncError::Parse(format!("Invalid value: {}", e)))?;
-
-        let decimals: u32 = item
-            .token_decimal
-            .parse()
-            .map_err(|e| SyncError::Parse(format!("Invalid decimals: {}", e)))?;
-
-        let divisor = rust_decimal::Decimal::from(10u64.pow(decimals));
-        let normalized_value = value / divisor;
-
-        Ok(Erc20TransferInsert {
-            token_name: ctx.token,
-            chain: ctx.chain,
-            from_address: item.from,
-            to_address: item.to,
-            txn_hash: item.hash,
-            value: normalized_value,
-            block_number,
-            block_timestamp,
-        })
-    }
 }
 
 // API response types for TronScan
