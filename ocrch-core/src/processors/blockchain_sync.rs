@@ -12,9 +12,10 @@ use crate::entities::StablecoinName;
 use crate::entities::erc20_pending_deposit::EtherScanChain;
 use crate::entities::erc20_transfer::{Erc20TokenTransfer, Erc20TransferInsert};
 use crate::entities::trc20_transfer::{Trc20TokenTransfer, Trc20TransferInsert};
-use rust_decimal::Decimal;
 use crate::events::{BlockchainTarget, MatchTick, MatchTickSender, PoolingTickReceiver};
 use async_trait::async_trait;
+use reqwest::header::HeaderMap;
+use rust_decimal::Decimal;
 use sqlx::PgPool;
 use thiserror::Error;
 use tokio::sync::watch;
@@ -113,13 +114,6 @@ impl Erc20BlockchainSync {
         &self,
         start_block: i64,
     ) -> Result<Vec<Erc20TokenTransferResponseItem>, SyncError> {
-        #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-        struct EtherScanResponse<T> {
-            status: String,
-            message: String,
-            result: T,
-        }
-
         let sdk_token: ocrch_sdk::objects::Stablecoin = self.token.into();
         let Some(contract_address) = sdk_token.get_data().get_contract_address(self.chain.into())
         else {
@@ -167,13 +161,6 @@ impl Erc20BlockchainSync {
     /// Fetch the block number of a transaction from the EtherScan API.
     async fn fetch_tx_block_number(&self, tx_hash: &str) -> Result<i64, SyncError> {
         #[derive(Debug, serde::Deserialize)]
-        struct EtherScanResponse<T> {
-            status: String,
-            message: String,
-            result: T,
-        }
-
-        #[derive(Debug, serde::Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct TxInfo {
             block_number: String,
@@ -193,14 +180,15 @@ impl Erc20BlockchainSync {
             .send()
             .await?;
 
-        let response: EtherScanResponse<Option<TxInfo>> = response.json().await?;
+        let response: EtherScanProxyResponse<Option<TxInfo>> = response.json().await?;
 
-        let tx_info = response.result.ok_or_else(|| SyncError::ApiError {
-            message: format!("Transaction {} not found", tx_hash),
-        })?;
+        let tx_block_number = response
+            .result
+            .map(|info| info.block_number)
+            .unwrap_or("0x0".to_string());
 
         // Block number from eth_getTransactionByHash is hex-encoded
-        let block_number = i64::from_str_radix(tx_info.block_number.trim_start_matches("0x"), 16)
+        let block_number = i64::from_str_radix(tx_block_number.trim_start_matches("0x"), 16)
             .map_err(|e| SyncError::Parse(format!("Invalid block number: {}", e)))?;
 
         Ok(block_number)
@@ -308,9 +296,17 @@ pub struct Trc20BlockchainSync {
     http_client: reqwest::Client,
     /// Optional starting transaction hash for initial sync fallback.
     starting_tx: Option<String>,
+    api_key: String,
 }
 
 impl Trc20BlockchainSync {
+    const TRON_SCAN_TRC20_TRANSFERS_URL: &str =
+        "https://apilist.tronscanapi.com/api/token_trc20/transfers";
+
+    const TRON_SCAN_TX_INFO_URL: &str = "https://apilist.tronscanapi.com/api/transaction-info";
+
+    const TRON_SCAN_AUTHORIZATION_HEADER: &str = "TRON-PRO-API-KEY";
+
     /// Create a new Trc20BlockchainSync.
     ///
     /// # Arguments
@@ -324,6 +320,7 @@ impl Trc20BlockchainSync {
         wallet_address: String,
         contract_address: String,
         starting_tx: Option<String>,
+        api_key: String,
     ) -> Self {
         Self {
             token,
@@ -331,6 +328,7 @@ impl Trc20BlockchainSync {
             contract_address,
             http_client: reqwest::Client::new(),
             starting_tx,
+            api_key,
         }
     }
 
@@ -338,13 +336,22 @@ impl Trc20BlockchainSync {
     async fn fetch_transfers(
         &self,
         start_timestamp: i64,
-    ) -> Result<Vec<Trc20TransferData>, SyncError> {
-        let url = format!(
-            "https://apilist.tronscanapi.com/api/filter/trc20/transfers?limit=200&contract_address={}&toAddress={}&start_timestamp={}",
-            self.contract_address, self.wallet_address, start_timestamp
-        );
-
-        let response = self.http_client.get(&url).send().await?;
+        offset: i64,
+        limit: i64,
+    ) -> Result<TronScanTransfersResponse<Vec<Trc20TransferData>>, SyncError> {
+        let response = self
+            .http_client
+            .get(Self::TRON_SCAN_TRC20_TRANSFERS_URL)
+            .query(&[
+                ("contract_address", self.contract_address.as_str()),
+                ("toAddress", self.wallet_address.as_str()),
+                ("start_timestamp", start_timestamp.to_string().as_str()),
+                ("start", offset.to_string().as_str()),
+                ("limit", limit.to_string().as_str()),
+            ])
+            .header(Self::TRON_SCAN_AUTHORIZATION_HEADER, self.api_key.as_str())
+            .send()
+            .await?;
 
         if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Err(SyncError::RateLimited {
@@ -352,9 +359,10 @@ impl Trc20BlockchainSync {
             });
         }
 
-        let response_json: TronScanResponse = response.json().await?;
+        let response_json: TronScanTransfersResponse<Vec<Trc20TransferData>> =
+            response.json().await?;
 
-        Ok(response_json.token_transfers)
+        Ok(response_json)
     }
 
     /// Get the cursor timestamp from the materialized view.
@@ -376,12 +384,13 @@ impl Trc20BlockchainSync {
             timestamp: i64,
         }
 
-        let url = format!(
-            "https://apilist.tronscanapi.com/api/transaction-info?hash={}",
-            tx_hash
-        );
-
-        let response = self.http_client.get(&url).send().await?;
+        let response = self
+            .http_client
+            .get(Self::TRON_SCAN_TX_INFO_URL)
+            .query(&[("hash", tx_hash)])
+            .header(Self::TRON_SCAN_AUTHORIZATION_HEADER, self.api_key.as_str())
+            .send()
+            .await?;
 
         if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Err(SyncError::RateLimited {
@@ -447,7 +456,7 @@ impl Trc20BlockchainSync {
                     .map_err(|e| SyncError::Parse(format!("Invalid value: {}", e)))?;
 
                 // TRC-20 USDT/USDC typically use 6 decimals
-                let divisor = Decimal::from(10u64.pow(transfer.decimals as u32));
+                let divisor = Decimal::from(10u64.pow(transfer.token_info.decimals as u32));
                 let normalized_value = value / divisor;
 
                 Ok(Trc20TransferInsert {
@@ -474,6 +483,8 @@ impl Trc20BlockchainSync {
 #[async_trait]
 impl BlockchainSync for Trc20BlockchainSync {
     async fn sync(&self, pool: &PgPool) -> Result<u32, SyncError> {
+        const PAGE_LIMIT: i64 = 200;
+
         let start_timestamp = self.get_start_timestamp(pool).await?;
 
         debug!(
@@ -482,9 +493,26 @@ impl BlockchainSync for Trc20BlockchainSync {
             "Fetching TRC-20 transfers"
         );
 
-        let transfers = self.fetch_transfers(start_timestamp).await?;
+        let mut all_transfers = Vec::new();
+        let mut offset: i64 = 0;
 
-        let inserted = self.insert_transfers(pool, transfers).await?;
+        loop {
+            let response = self
+                .fetch_transfers(start_timestamp, offset, PAGE_LIMIT)
+                .await?;
+
+            let page_count = response.token_transfers.len() as i64;
+            all_transfers.extend(response.token_transfers);
+
+            // Check if we've fetched all available transfers
+            if page_count < PAGE_LIMIT || all_transfers.len() as i64 >= response.range_total {
+                break;
+            }
+
+            offset += PAGE_LIMIT;
+        }
+
+        let inserted = self.insert_transfers(pool, all_transfers).await?;
 
         debug!(
             token = ?self.token,
@@ -655,6 +683,22 @@ pub struct Erc20TokenTransferResponseItem {
     pub token_decimal: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[allow(unused)]
+struct EtherScanResponse<T> {
+    status: String,
+    message: String,
+    result: T,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[allow(unused)]
+struct EtherScanProxyResponse<T> {
+    jsonrpc: String,
+    id: u32,
+    result: T,
+}
+
 /// Context for converting API response items to database insert structs.
 pub struct Erc20TransferConversionContext {
     pub chain: EtherScanChain,
@@ -713,23 +757,27 @@ impl
 
 // API response types for TronScan
 #[derive(Debug, serde::Deserialize)]
-struct TronScanResponse {
-    #[serde(default)]
-    token_transfers: Vec<Trc20TransferData>,
+#[allow(unused)]
+struct TronScanTransfersResponse<T> {
+    pub total: i64,
+    #[serde(rename = "rangeTotal")]
+    pub range_total: i64,
+    pub token_transfers: T,
 }
 
 #[derive(Debug, serde::Deserialize)]
 struct Trc20TransferData {
-    transaction_id: String,
-    block_ts: i64,
-    block: i64,
-    from_address: String,
-    to_address: String,
-    quant: String,
-    #[serde(default = "default_decimals")]
-    decimals: i32,
+    pub transaction_id: String,
+    pub block_ts: i64,
+    pub block: i64,
+    pub from_address: String,
+    pub to_address: String,
+    pub quant: String,
+    #[serde(rename = "tokenInfo")]
+    pub token_info: Trc20TokenInfo,
 }
 
-fn default_decimals() -> i32 {
-    6 // Most TRC-20 stablecoins use 6 decimals
+#[derive(Debug, serde::Deserialize)]
+struct Trc20TokenInfo {
+    pub decimals: i32,
 }
