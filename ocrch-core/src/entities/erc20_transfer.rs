@@ -239,4 +239,28 @@ impl Erc20TokenTransfer {
         .await?;
         Ok(())
     }
+
+    /// Mark multiple transfers as having no matched deposit in a single query.
+    ///
+    /// Returns the number of rows updated.
+    pub async fn mark_no_matched_deposit_many(
+        pool: &sqlx::PgPool,
+        transfer_ids: &[i64],
+    ) -> Result<u64, sqlx::Error> {
+        if transfer_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let result = sqlx::query!(
+            r#"
+            UPDATE erc20_token_transfers
+            SET status = 'no_matched_deposit'
+            WHERE id = ANY($1)
+            "#,
+            transfer_ids,
+        )
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
 }

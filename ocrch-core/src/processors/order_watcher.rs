@@ -462,11 +462,15 @@ impl OrderBookWatcher {
         let old_transfers =
             Erc20TokenTransfer::get_old_unmatched_ids(&self.pool, chain, token).await?;
 
-        for transfer_id in old_transfers {
-            // Update status
-            Erc20TokenTransfer::mark_no_matched_deposit(&self.pool, transfer_id).await?;
+        if old_transfers.is_empty() {
+            return Ok(());
+        }
 
-            // Emit webhook event for unknown transfer
+        // Batch update all transfers at once
+        Erc20TokenTransfer::mark_no_matched_deposit_many(&self.pool, &old_transfers).await?;
+
+        // Emit webhook events for each unknown transfer
+        for transfer_id in old_transfers {
             let event = WebhookEvent::UnknownTransferReceived {
                 transfer_id,
                 blockchain: BlockchainTarget::Erc20(chain),
@@ -489,11 +493,15 @@ impl OrderBookWatcher {
         // Find transfers that have been waiting too long and mark as no_matched_deposit
         let old_transfers = Trc20TokenTransfer::get_old_unmatched_ids(&self.pool, token).await?;
 
-        for transfer_id in old_transfers {
-            // Update status
-            Trc20TokenTransfer::mark_no_matched_deposit(&self.pool, transfer_id).await?;
+        if old_transfers.is_empty() {
+            return Ok(());
+        }
 
-            // Emit webhook event for unknown transfer
+        // Batch update all transfers at once
+        Trc20TokenTransfer::mark_no_matched_deposit_many(&self.pool, &old_transfers).await?;
+
+        // Emit webhook events for each unknown transfer
+        for transfer_id in old_transfers {
             let event = WebhookEvent::UnknownTransferReceived {
                 transfer_id,
                 blockchain: BlockchainTarget::Trc20,

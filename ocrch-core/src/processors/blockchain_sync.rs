@@ -12,6 +12,7 @@ use crate::entities::StablecoinName;
 use crate::entities::erc20_pending_deposit::EtherScanChain;
 use crate::entities::erc20_transfer::{Erc20TokenTransfer, Erc20TransferInsert};
 use crate::entities::trc20_transfer::{Trc20TokenTransfer, Trc20TransferInsert};
+use rust_decimal::Decimal;
 use crate::events::{BlockchainTarget, MatchTick, MatchTickSender, PoolingTickReceiver};
 use async_trait::async_trait;
 use sqlx::PgPool;
@@ -433,39 +434,40 @@ impl Trc20BlockchainSync {
             return Ok(0);
         }
 
-        let mut inserted = 0u32;
+        let wallet_address_lower = self.wallet_address.to_lowercase();
 
-        for transfer in transfers {
-            // Only process incoming transfers to our wallet
-            if transfer.to_address.to_lowercase() != self.wallet_address.to_lowercase() {
-                continue;
-            }
+        // Filter incoming transfers to our wallet and convert to insert structs
+        let inserts: Vec<Trc20TransferInsert> = transfers
+            .into_iter()
+            .filter(|t| t.to_address.to_lowercase() == wallet_address_lower)
+            .map(|transfer| {
+                let value: Decimal = transfer
+                    .quant
+                    .parse()
+                    .map_err(|e| SyncError::Parse(format!("Invalid value: {}", e)))?;
 
-            let value: rust_decimal::Decimal = transfer
-                .quant
-                .parse()
-                .map_err(|e| SyncError::Parse(format!("Invalid value: {}", e)))?;
+                // TRC-20 USDT/USDC typically use 6 decimals
+                let divisor = Decimal::from(10u64.pow(transfer.decimals as u32));
+                let normalized_value = value / divisor;
 
-            // TRC-20 USDT/USDC typically use 6 decimals
-            let divisor = rust_decimal::Decimal::from(10u64.pow(transfer.decimals as u32));
-            let normalized_value = value / divisor;
+                Ok(Trc20TransferInsert {
+                    token_name: self.token,
+                    from_address: transfer.from_address,
+                    to_address: transfer.to_address,
+                    txn_hash: transfer.transaction_id,
+                    value: normalized_value,
+                    block_number: transfer.block,
+                    block_timestamp: transfer.block_ts,
+                })
+            })
+            .collect::<Result<Vec<_>, SyncError>>()?;
 
-            let transfer_insert = Trc20TransferInsert {
-                token_name: self.token,
-                from_address: transfer.from_address,
-                to_address: transfer.to_address,
-                txn_hash: transfer.transaction_id,
-                value: normalized_value,
-                block_number: transfer.block,
-                block_timestamp: transfer.block_ts,
-            };
-
-            if Trc20TokenTransfer::insert(pool, &transfer_insert).await? {
-                inserted += 1;
-            }
+        if inserts.is_empty() {
+            return Ok(0);
         }
 
-        Ok(inserted)
+        let inserted = Trc20TokenTransfer::insert_many(pool, &inserts).await?;
+        Ok(inserted as u32)
     }
 }
 

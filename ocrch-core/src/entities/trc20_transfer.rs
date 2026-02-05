@@ -107,6 +107,39 @@ impl Trc20TokenTransfer {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Insert multiple transfers in a single query.
+    ///
+    /// Uses QueryBuilder for efficient bulk insert with ON CONFLICT DO NOTHING.
+    /// Returns the number of rows actually inserted (excluding duplicates).
+    pub async fn insert_many(
+        pool: &sqlx::PgPool,
+        transfers: &[Trc20TransferInsert],
+    ) -> Result<u64, sqlx::Error> {
+        if transfers.is_empty() {
+            return Ok(0);
+        }
+
+        let mut query_builder = sqlx::QueryBuilder::new(
+            "INSERT INTO trc20_token_transfers \
+            (token_name, from_address, to_address, txn_hash, value, block_number, block_timestamp) ",
+        );
+
+        query_builder.push_values(transfers, |mut b, transfer| {
+            b.push_bind(transfer.token_name as StablecoinName)
+                .push_bind(&transfer.from_address)
+                .push_bind(&transfer.to_address)
+                .push_bind(&transfer.txn_hash)
+                .push_bind(transfer.value)
+                .push_bind(transfer.block_number)
+                .push_bind(transfer.block_timestamp);
+        });
+
+        query_builder.push(" ON CONFLICT (txn_hash) DO NOTHING");
+
+        let result = query_builder.build().execute(pool).await?;
+        Ok(result.rows_affected())
+    }
+
     /// Get unmatched transfers that are waiting for a deposit match.
     pub async fn get_unmatched(
         pool: &sqlx::PgPool,
@@ -190,5 +223,29 @@ impl Trc20TokenTransfer {
         .execute(pool)
         .await?;
         Ok(())
+    }
+
+    /// Mark multiple transfers as having no matched deposit in a single query.
+    ///
+    /// Returns the number of rows updated.
+    pub async fn mark_no_matched_deposit_many(
+        pool: &sqlx::PgPool,
+        transfer_ids: &[i64],
+    ) -> Result<u64, sqlx::Error> {
+        if transfer_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let result = sqlx::query!(
+            r#"
+            UPDATE trc20_token_transfers
+            SET status = 'no_matched_deposit'
+            WHERE id = ANY($1)
+            "#,
+            transfer_ids,
+        )
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 }
