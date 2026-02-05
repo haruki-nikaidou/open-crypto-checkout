@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE erc20_token_transfers\n            SET status = 'no_matched_deposit'\n            WHERE id = ANY($1)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c8fd55e73fe8f4a04c2f324cbbc25414ede642adf56bf9bbc078045affd915f5"
+}
