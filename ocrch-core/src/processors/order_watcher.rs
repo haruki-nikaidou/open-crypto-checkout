@@ -206,28 +206,27 @@ impl OrderBookWatcher {
             transfers = transfers.len(),
             "Attempting to match ERC-20 transfers"
         );
-        let (matches, unmatched_transfers, unmatched_deposits) =
-            Self::compute_matches(transfers, deposits);
+        let (matches, _, _) = Self::compute_matches(transfers, deposits);
 
         if matches.is_empty() {
             self.check_erc20_unknown_transfers(chain, token).await?;
             return Ok(());
         }
-        let _ = matches.iter().inspect(|m| {
-            info!(
-                chain = ?chain,
-                token = ?token,
-                transfer_id = m.transfer_id,
-                deposit_id = m.deposit_id,
-                order_id = %m.order_id,
-                "Matched ERC-20 transfer to deposit"
-            );
-        });
 
-        // Prepare batch arrays from computed matches
-        let transfer_ids: Vec<i64> = matches.iter().map(|m| m.transfer_id).collect();
-        let deposit_ids: Vec<i64> = matches.iter().map(|m| m.deposit_id).collect();
-        let order_ids: Vec<Uuid> = matches.iter().map(|m| m.order_id).collect();
+        let (transfer_ids, deposit_ids, order_ids): (Vec<_>, Vec<_>, Vec<_>) = matches
+            .into_iter()
+            .inspect(|m| {
+                info!(
+                    chain = ?chain,
+                    token = ?token,
+                    transfer_id = m.transfer_id,
+                    deposit_id = m.deposit_id,
+                    order_id = %m.order_id,
+                    "Matched ERC-20 transfer to deposit"
+                );
+            })
+            .map(|m| (m.transfer_id, m.deposit_id, m.order_id))
+            .multiunzip();
 
         // Execute all matches in a single transaction — O(1) DB operations
         // Exactly 4 SQL statements regardless of the number of matches.
@@ -249,15 +248,14 @@ impl OrderBookWatcher {
         tx.commit().await?;
 
         // Emit webhook events after successful commit
-        for m in &matches {
+        for order_id in order_ids {
             let event = WebhookEvent::OrderStatusChanged {
-                order_id: m.order_id,
+                order_id,
                 new_status: OrderStatus::Paid,
             };
-
             if let Err(e) = self.webhook_tx.send(event).await {
                 error!(
-                    order_id = %m.order_id,
+                    order_id = %order_id,
                     error = %e,
                     "Failed to send WebhookEvent"
                 );
@@ -295,12 +293,16 @@ impl OrderBookWatcher {
             "Attempting to match TRC-20 transfers"
         );
 
-        let (matches, unmatched_transfers, unmatched_deposits) =
-            Self::compute_matches(transfers, deposits);
+        let (matches, _, _) = Self::compute_matches(transfers, deposits);
 
-        if !matches.is_empty() {
-            // Log each match
-            for m in &matches {
+        if matches.is_empty() {
+            self.check_trc20_unknown_transfers(token).await?;
+            return Ok(());
+        }
+
+        let (transfer_ids, deposit_ids, order_ids): (Vec<_>, Vec<_>, Vec<_>) = matches
+            .into_iter()
+            .inspect(|m| {
                 info!(
                     token = ?token,
                     transfer_id = m.transfer_id,
@@ -308,50 +310,42 @@ impl OrderBookWatcher {
                     order_id = %m.order_id,
                     "Matched TRC-20 transfer to deposit"
                 );
-            }
+            })
+            .map(|m| (m.transfer_id, m.deposit_id, m.order_id))
+            .multiunzip();
 
-            // Prepare batch arrays from computed matches
-            let transfer_ids: Vec<i64> = matches.iter().map(|m| m.transfer_id).collect();
-            let deposit_ids: Vec<i64> = matches.iter().map(|m| m.deposit_id).collect();
-            let order_ids: Vec<Uuid> = matches.iter().map(|m| m.order_id).collect();
+        // Execute all matches in a single transaction — O(1) DB operations
+        // Exactly 4 SQL statements regardless of the number of matches.
+        let mut tx = self.pool.begin().await?;
 
-            // Execute all matches in a single transaction — O(1) DB operations
-            // Exactly 4 SQL statements regardless of the number of matches.
-            let mut tx = self.pool.begin().await?;
+        // 1. Batch mark transfers as matched
+        Trc20TokenTransfer::mark_matched_many_tx(&mut tx, &transfer_ids, &deposit_ids).await?;
 
-            // 1. Batch mark transfers as matched
-            Trc20TokenTransfer::mark_matched_many_tx(&mut tx, &transfer_ids, &deposit_ids).await?;
+        // 2. Batch update order statuses to Paid
+        OrderRecord::update_status_many_tx(&mut tx, &order_ids, OrderStatus::Paid).await?;
 
-            // 2. Batch update order statuses to Paid
-            OrderRecord::update_status_many_tx(&mut tx, &order_ids, OrderStatus::Paid).await?;
-
-            // 3. Batch delete TRC-20 pending deposits (keep matched ones)
-            Trc20PendingDeposit::delete_for_orders_except_many_tx(
-                &mut tx,
-                &order_ids,
-                &deposit_ids,
-            )
+        // 3. Batch delete TRC-20 pending deposits (keep matched ones)
+        Trc20PendingDeposit::delete_for_orders_except_many_tx(&mut tx, &order_ids, &deposit_ids)
             .await?;
 
-            // 4. Batch delete ERC-20 pending deposits for matched orders
-            Erc20PendingDeposit::delete_for_orders_many_tx(&mut tx, &order_ids).await?;
+        // 4. Batch delete ERC-20 pending deposits for matched orders
+        Erc20PendingDeposit::delete_for_orders_many_tx(&mut tx, &order_ids).await?;
 
-            tx.commit().await?;
+        tx.commit().await?;
 
-            // Emit webhook events after successful commit
-            for m in &matches {
-                let event = WebhookEvent::OrderStatusChanged {
-                    order_id: m.order_id,
-                    new_status: OrderStatus::Paid,
-                };
+        // Emit webhook events after successful commit
+        for order_id in order_ids {
+            let event = WebhookEvent::OrderStatusChanged {
+                order_id,
+                new_status: OrderStatus::Paid,
+            };
 
-                if let Err(e) = self.webhook_tx.send(event).await {
-                    error!(
-                        order_id = %m.order_id,
-                        error = %e,
-                        "Failed to send WebhookEvent"
-                    );
-                }
+            if let Err(e) = self.webhook_tx.send(event).await {
+                error!(
+                    order_id = %order_id,
+                    error = %e,
+                    "Failed to send WebhookEvent"
+                );
             }
         }
 
