@@ -714,17 +714,17 @@ pub struct Erc20TokenTransferResponseItem {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[allow(unused)]
 struct EtherScanResponse<T> {
-    status: String,
-    message: String,
-    result: T,
+    pub status: String,
+    pub message: String,
+    pub result: T,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[allow(unused)]
 struct EtherScanProxyResponse<T> {
-    jsonrpc: String,
-    id: u32,
-    result: T,
+    pub jsonrpc: String,
+    pub id: u32,
+    pub result: T,
 }
 
 // API response types for TronScan

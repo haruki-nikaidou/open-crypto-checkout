@@ -19,9 +19,10 @@ use crate::entities::trc20_transfer::{Trc20TokenTransfer, Trc20UnmatchedTransfer
 use crate::events::{
     BlockchainTarget, MatchTick, MatchTickReceiver, WebhookEvent, WebhookEventSender,
 };
+use compact_str::CompactString;
+use itertools::{EitherOrBoth, Itertools};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
-use std::collections::HashSet;
 use thiserror::Error;
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
@@ -181,7 +182,6 @@ impl OrderBookWatcher {
     ) -> Result<(), MatchError> {
         // Get pending deposits for this chain-token pair
         let deposits = self.get_erc20_pending_deposits(chain, token).await?;
-
         if deposits.is_empty() {
             debug!(
                 chain = ?chain,
@@ -193,7 +193,6 @@ impl OrderBookWatcher {
 
         // Get unmatched transfers for this chain-token pair
         let transfers = self.get_unmatched_erc20_transfers(chain, token).await?;
-
         if transfers.is_empty() {
             debug!(
                 chain = ?chain,
@@ -203,72 +202,68 @@ impl OrderBookWatcher {
             return Ok(());
         }
 
-        debug!(
+        info!(
             chain = ?chain,
             token = ?token,
             deposits = deposits.len(),
             transfers = transfers.len(),
             "Attempting to match ERC-20 transfers"
         );
+        let (matches, unmatched_transfers, unmatched_deposits) =
+            Self::compute_matches(transfers, deposits);
 
-        // Compute all matches in memory — O(m*n)
-        let matches = self.compute_matches(&transfers, &deposits);
+        if matches.is_empty() {
+            self.check_erc20_unknown_transfers(chain, token).await?;
+            return Ok(());
+        }
+        let _ = matches.iter().inspect(|m| {
+            info!(
+                chain = ?chain,
+                token = ?token,
+                transfer_id = m.transfer_id,
+                deposit_id = m.deposit_id,
+                order_id = %m.order_id,
+                "Matched ERC-20 transfer to deposit"
+            );
+        });
 
-        if !matches.is_empty() {
-            // Log each match
-            for m in &matches {
-                info!(
-                    chain = ?chain,
-                    token = ?token,
-                    transfer_id = m.transfer_id,
-                    deposit_id = m.deposit_id,
-                    order_id = %m.order_id,
-                    "Matched ERC-20 transfer to deposit"
-                );
-            }
+        // Prepare batch arrays from computed matches
+        let transfer_ids: Vec<i64> = matches.iter().map(|m| m.transfer_id).collect();
+        let deposit_ids: Vec<i64> = matches.iter().map(|m| m.deposit_id).collect();
+        let order_ids: Vec<Uuid> = matches.iter().map(|m| m.order_id).collect();
 
-            // Prepare batch arrays from computed matches
-            let transfer_ids: Vec<i64> = matches.iter().map(|m| m.transfer_id).collect();
-            let deposit_ids: Vec<i64> = matches.iter().map(|m| m.deposit_id).collect();
-            let order_ids: Vec<Uuid> = matches.iter().map(|m| m.order_id).collect();
+        // Execute all matches in a single transaction — O(1) DB operations
+        // Exactly 4 SQL statements regardless of the number of matches.
+        let mut tx = self.pool.begin().await?;
 
-            // Execute all matches in a single transaction — O(1) DB operations
-            // Exactly 4 SQL statements regardless of the number of matches.
-            let mut tx = self.pool.begin().await?;
+        // 1. Batch mark transfers as matched
+        Erc20TokenTransfer::mark_matched_many_tx(&mut tx, &transfer_ids, &deposit_ids).await?;
 
-            // 1. Batch mark transfers as matched
-            Erc20TokenTransfer::mark_matched_many_tx(&mut tx, &transfer_ids, &deposit_ids).await?;
+        // 2. Batch update order statuses to Paid
+        OrderRecord::update_status_many_tx(&mut tx, &order_ids, OrderStatus::Paid).await?;
 
-            // 2. Batch update order statuses to Paid
-            OrderRecord::update_status_many_tx(&mut tx, &order_ids, OrderStatus::Paid).await?;
-
-            // 3. Batch delete ERC-20 pending deposits (keep matched ones)
-            Erc20PendingDeposit::delete_for_orders_except_many_tx(
-                &mut tx,
-                &order_ids,
-                &deposit_ids,
-            )
+        // 3. Batch delete ERC-20 pending deposits (keep matched ones)
+        Erc20PendingDeposit::delete_for_orders_except_many_tx(&mut tx, &order_ids, &deposit_ids)
             .await?;
 
-            // 4. Batch delete TRC-20 pending deposits for matched orders
-            Trc20PendingDeposit::delete_for_orders_many_tx(&mut tx, &order_ids).await?;
+        // 4. Batch delete TRC-20 pending deposits for matched orders
+        Trc20PendingDeposit::delete_for_orders_many_tx(&mut tx, &order_ids).await?;
 
-            tx.commit().await?;
+        tx.commit().await?;
 
-            // Emit webhook events after successful commit
-            for m in &matches {
-                let event = WebhookEvent::OrderStatusChanged {
-                    order_id: m.order_id,
-                    new_status: OrderStatus::Paid,
-                };
+        // Emit webhook events after successful commit
+        for m in &matches {
+            let event = WebhookEvent::OrderStatusChanged {
+                order_id: m.order_id,
+                new_status: OrderStatus::Paid,
+            };
 
-                if let Err(e) = self.webhook_tx.send(event).await {
-                    error!(
-                        order_id = %m.order_id,
-                        error = %e,
-                        "Failed to send WebhookEvent"
-                    );
-                }
+            if let Err(e) = self.webhook_tx.send(event).await {
+                error!(
+                    order_id = %m.order_id,
+                    error = %e,
+                    "Failed to send WebhookEvent"
+                );
             }
         }
 
@@ -306,8 +301,8 @@ impl OrderBookWatcher {
             "Attempting to match TRC-20 transfers"
         );
 
-        // Compute all matches in memory — O(m*n)
-        let matches = self.compute_matches(&transfers, &deposits);
+        let (matches, unmatched_transfers, unmatched_deposits) =
+            Self::compute_matches(transfers, deposits);
 
         if !matches.is_empty() {
             // Log each match
@@ -374,47 +369,66 @@ impl OrderBookWatcher {
 
     /// Compute all matches between transfers and deposits in memory.
     ///
-    /// O(m*n) where m = transfers.len() and n = deposits.len().
-    /// Each deposit is matched at most once (first-come-first-served by
-    /// transfer ordering). Each transfer is matched to at most one deposit.
+    /// For the same wallet address, deposit amounts should be guaranteed to be unique.
+    ///
+    /// O(m + n) where m = transfers.len() and n = deposits.len().
     fn compute_matches(
-        &self,
-        transfers: &[UnmatchedTransfer],
-        deposits: &[PendingDepositMatch],
-    ) -> Vec<MatchResult> {
-        let mut matched_deposit_ids: HashSet<i64> = HashSet::new();
-        let mut results = Vec::new();
+        transfers: Vec<UnmatchedTransfer>,
+        deposits: Vec<PendingDepositMatch>,
+    ) -> (
+        Vec<MatchResult>,
+        Vec<UnmatchedTransfer>,
+        Vec<PendingDepositMatch>,
+    ) {
+        #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+        // Tuple struct for sorting by value then address
+        struct DepositKey(Decimal, CompactString);
+        let mut transfers = transfers
+            .into_iter()
+            .map(|t| {
+                let to_address = t.to_address.to_lowercase();
+                (DepositKey(t.value, to_address.into()), t)
+            })
+            .collect::<Vec<_>>();
+        let mut deposits = deposits
+            .into_iter()
+            .map(|d| {
+                let wallet_address = d.wallet_address.to_lowercase();
+                (DepositKey(d.value, wallet_address.into()), d)
+            })
+            .collect::<Vec<_>>();
+        transfers.sort_by_key(|(key, _)| key.to_owned());
+        deposits.sort_by_key(|(key, _)| key.to_owned());
 
-        for transfer in transfers {
-            for deposit in deposits {
-                // Skip deposits that have already been matched
-                if matched_deposit_ids.contains(&deposit.id) {
-                    continue;
-                }
+        let sorted_transfers = transfers;
+        let sorted_deposits = deposits;
 
-                // Wallet address must match (case-insensitive)
-                let address_matches =
-                    deposit.wallet_address.to_lowercase() == transfer.to_address.to_lowercase();
+        let results: Vec<_> = sorted_transfers
+            .into_iter()
+            .merge_join_by(sorted_deposits.into_iter(), |(k1, _), (k2, _)| k1.cmp(k2))
+            .map(|eob| match eob {
+                EitherOrBoth::Left((_, t)) => EitherOrBoth::Left(t),
+                EitherOrBoth::Right((_, d)) => EitherOrBoth::Right(d),
+                EitherOrBoth::Both((_, t), (_, d)) => EitherOrBoth::Both(t, d),
+            })
+            .collect();
 
-                // Value must match exactly
-                let value_matches = deposit.value == transfer.value;
+        let mut matched: Vec<MatchResult> = Vec::new();
+        let mut left_only: Vec<UnmatchedTransfer> = Vec::new();
+        let mut right_only: Vec<PendingDepositMatch> = Vec::new();
 
-                // Transfer must be after deposit was created
-                let time_valid = transfer.block_timestamp >= deposit.started_at_timestamp;
-
-                if address_matches && value_matches && time_valid {
-                    matched_deposit_ids.insert(deposit.id);
-                    results.push(MatchResult {
-                        transfer_id: transfer.id,
-                        deposit_id: deposit.id,
-                        order_id: deposit.order_id,
-                    });
-                    break; // Move to next transfer
-                }
+        for result in results {
+            match result {
+                EitherOrBoth::Left(t) => left_only.push(t),
+                EitherOrBoth::Right(d) => right_only.push(d),
+                EitherOrBoth::Both(t, d) => matched.push(MatchResult {
+                    transfer_id: t.id,
+                    deposit_id: d.id,
+                    order_id: d.order_id,
+                }),
             }
         }
-
-        results
+        (matched, left_only, right_only)
     }
 
     /// Get pending ERC-20 deposits for matching.
