@@ -205,4 +205,30 @@ impl OrderRecord {
         .await?;
         Ok(())
     }
+
+    /// Update the status of multiple orders in a single query within a transaction.
+    ///
+    /// Uses `ANY` to batch-update all matching rows in one SQL statement.
+    pub async fn update_status_many_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        order_ids: &[Uuid],
+        status: OrderStatus,
+    ) -> Result<u64, sqlx::Error> {
+        if order_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let result = sqlx::query(
+            r#"
+            UPDATE order_records
+            SET status = $1
+            WHERE order_id = ANY($2)
+            "#,
+        )
+        .bind(status)
+        .bind(order_ids)
+        .execute(&mut **tx)
+        .await?;
+        Ok(result.rows_affected())
+    }
 }

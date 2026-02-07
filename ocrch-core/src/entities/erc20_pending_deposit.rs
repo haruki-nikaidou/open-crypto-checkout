@@ -190,4 +190,55 @@ impl Erc20PendingDeposit {
         .await?;
         Ok(())
     }
+
+    /// Delete pending deposits for multiple orders, each keeping one (the matched one).
+    ///
+    /// Uses `UNNEST` to batch-delete in a single SQL statement.
+    /// `order_ids[i]` and `except_ids[i]` are paired: for each order, the deposit
+    /// with `except_ids[i]` is kept.
+    pub async fn delete_for_orders_except_many_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        order_ids: &[uuid::Uuid],
+        except_ids: &[i64],
+    ) -> Result<u64, sqlx::Error> {
+        if order_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let result = sqlx::query(
+            r#"
+            DELETE FROM erc20_pending_deposits AS d
+            USING UNNEST($1::uuid[], $2::bigint[]) AS u(order_id, except_id)
+            WHERE d."order" = u.order_id AND d.id != u.except_id
+            "#,
+        )
+        .bind(order_ids)
+        .bind(except_ids)
+        .execute(&mut **tx)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Delete all pending deposits for multiple orders in a single query.
+    ///
+    /// Uses `ANY` to batch-delete in one SQL statement.
+    pub async fn delete_for_orders_many_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        order_ids: &[uuid::Uuid],
+    ) -> Result<u64, sqlx::Error> {
+        if order_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let result = sqlx::query(
+            r#"
+            DELETE FROM erc20_pending_deposits
+            WHERE "order" = ANY($1)
+            "#,
+        )
+        .bind(order_ids)
+        .execute(&mut **tx)
+        .await?;
+        Ok(result.rows_affected())
+    }
 }

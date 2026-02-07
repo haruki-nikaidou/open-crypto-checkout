@@ -186,6 +186,33 @@ impl Trc20TokenTransfer {
         Ok(())
     }
 
+    /// Mark multiple transfers as matched with their fulfillment IDs in a single query.
+    ///
+    /// Uses `UNNEST` to batch-update all rows in one SQL statement.
+    pub async fn mark_matched_many_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        transfer_ids: &[i64],
+        fulfillment_ids: &[i64],
+    ) -> Result<u64, sqlx::Error> {
+        if transfer_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let result = sqlx::query(
+            r#"
+            UPDATE trc20_token_transfers AS t
+            SET status = 'matched', fulfillment_id = u.fulfillment_id
+            FROM UNNEST($1::bigint[], $2::bigint[]) AS u(id, fulfillment_id)
+            WHERE t.id = u.id
+            "#,
+        )
+        .bind(transfer_ids)
+        .bind(fulfillment_ids)
+        .execute(&mut **tx)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Get IDs of old unmatched transfers (older than 1 hour) for marking as unknown.
     pub async fn get_old_unmatched_ids(
         pool: &sqlx::PgPool,
