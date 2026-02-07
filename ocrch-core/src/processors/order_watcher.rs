@@ -172,9 +172,6 @@ impl OrderBookWatcher {
     }
 
     /// Match ERC-20 transfers to pending deposits.
-    ///
-    /// All matches are computed in memory (O(m*n)) then committed in a single
-    /// database transaction (O(1) DB operations).
     async fn match_erc20_transfers(
         &self,
         chain: EtherScanChain,
@@ -274,9 +271,6 @@ impl OrderBookWatcher {
     }
 
     /// Match TRC-20 transfers to pending deposits.
-    ///
-    /// All matches are computed in memory (O(m*n)) then committed in a single
-    /// database transaction (O(1) DB operations).
     async fn match_trc20_transfers(&self, token: StablecoinName) -> Result<(), MatchError> {
         // Get pending deposits for this token
         let deposits = self.get_trc20_pending_deposits(token).await?;
