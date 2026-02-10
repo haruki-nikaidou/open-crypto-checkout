@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+kanau = { workspace = true }
 sqlx = { workspace = true }
 ocrch-sdk = { path = "../ocrch-sdk" }
 tracing = { workspace = true }

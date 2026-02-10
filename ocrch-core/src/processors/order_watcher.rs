@@ -10,17 +10,27 @@
 
 use crate::entities::StablecoinName;
 use crate::entities::erc20_pending_deposit::{
-    Erc20PendingDeposit, Erc20PendingDepositMatch, EtherScanChain,
+    Erc20PendingDeposit, Erc20PendingDepositMatch, EtherScanChain, GetErc20DepositsForMatching,
 };
-use crate::entities::erc20_transfer::{Erc20TokenTransfer, Erc20UnmatchedTransfer};
+use crate::entities::erc20_transfer::{
+    Erc20TokenTransfer, Erc20UnmatchedTransfer, GetErc20TokenTransfersUnmatched,
+    GetOldUnmatchedErc20TransferIds, MarkErc20TransfersNoMatchedDeposit,
+};
 use crate::entities::order_records::{OrderRecord, OrderStatus};
-use crate::entities::trc20_pending_deposit::{Trc20PendingDeposit, Trc20PendingDepositMatch};
-use crate::entities::trc20_transfer::{Trc20TokenTransfer, Trc20UnmatchedTransfer};
+use crate::entities::trc20_pending_deposit::{
+    GetTrc20DepositsForMatching, Trc20PendingDeposit, Trc20PendingDepositMatch,
+};
+use crate::entities::trc20_transfer::{
+    GetOldUnmatchedTrc20TransferIds, GetTrc20TokenTransfersUnmatched,
+    MarkTrc20TransfersNoMatchedDeposit, Trc20TokenTransfer, Trc20UnmatchedTransfer,
+};
 use crate::events::{
     BlockchainTarget, MatchTick, MatchTickReceiver, WebhookEvent, WebhookEventSender,
 };
+use crate::framework::DatabaseProcessor;
 use compact_str::CompactString;
 use itertools::{EitherOrBoth, Itertools};
+use kanau::processor::Processor;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use thiserror::Error;
@@ -425,7 +435,12 @@ impl OrderBookWatcher {
         chain: EtherScanChain,
         token: StablecoinName,
     ) -> Result<Vec<PendingDepositMatch>, MatchError> {
-        let deposits = Erc20PendingDeposit::get_for_matching(&self.pool, chain, token)
+        let processor = DatabaseProcessor {
+            pool: self.pool.clone(),
+        };
+        let query = GetErc20DepositsForMatching { chain, token };
+        let deposits = processor
+            .process(query)
             .await?
             .into_iter()
             .map(PendingDepositMatch::from)
@@ -438,7 +453,11 @@ impl OrderBookWatcher {
         &self,
         token: StablecoinName,
     ) -> Result<Vec<PendingDepositMatch>, MatchError> {
-        let deposits = Trc20PendingDeposit::get_for_matching(&self.pool, token)
+        let processor = DatabaseProcessor {
+            pool: self.pool.clone(),
+        };
+        let deposits = processor
+            .process(GetTrc20DepositsForMatching { token })
             .await?
             .into_iter()
             .map(PendingDepositMatch::from)
@@ -452,7 +471,11 @@ impl OrderBookWatcher {
         chain: EtherScanChain,
         token: StablecoinName,
     ) -> Result<Vec<UnmatchedTransfer>, MatchError> {
-        let transfers = Erc20TokenTransfer::get_unmatched(&self.pool, chain, token)
+        let processor = DatabaseProcessor {
+            pool: self.pool.clone(),
+        };
+        let transfers = processor
+            .process(GetErc20TokenTransfersUnmatched { chain, token })
             .await?
             .into_iter()
             .map(UnmatchedTransfer::from)
@@ -465,7 +488,11 @@ impl OrderBookWatcher {
         &self,
         token: StablecoinName,
     ) -> Result<Vec<UnmatchedTransfer>, MatchError> {
-        let transfers = Trc20TokenTransfer::get_unmatched(&self.pool, token)
+        let processor = DatabaseProcessor {
+            pool: self.pool.clone(),
+        };
+        let transfers = processor
+            .process(GetTrc20TokenTransfersUnmatched { token })
             .await?
             .into_iter()
             .map(UnmatchedTransfer::from)
@@ -481,15 +508,23 @@ impl OrderBookWatcher {
     ) -> Result<(), MatchError> {
         // Find transfers that have been waiting too long and mark as no_matched_deposit
         // These are transfers older than 1 hour that haven't been matched
-        let old_transfers =
-            Erc20TokenTransfer::get_old_unmatched_ids(&self.pool, chain, token).await?;
+        let processor = DatabaseProcessor {
+            pool: self.pool.clone(),
+        };
+        let old_transfers = processor
+            .process(GetOldUnmatchedErc20TransferIds { chain, token })
+            .await?;
 
         if old_transfers.is_empty() {
             return Ok(());
         }
 
         // Batch update all transfers at once
-        Erc20TokenTransfer::mark_no_matched_deposit_many(&self.pool, &old_transfers).await?;
+        processor
+            .process(MarkErc20TransfersNoMatchedDeposit {
+                transfer_ids: old_transfers.clone(),
+            })
+            .await?;
 
         // Emit webhook events for each unknown transfer
         for transfer_id in old_transfers {
@@ -513,14 +548,23 @@ impl OrderBookWatcher {
     /// Check for unknown TRC-20 transfers and emit webhook events.
     async fn check_trc20_unknown_transfers(&self, token: StablecoinName) -> Result<(), MatchError> {
         // Find transfers that have been waiting too long and mark as no_matched_deposit
-        let old_transfers = Trc20TokenTransfer::get_old_unmatched_ids(&self.pool, token).await?;
+        let processor = DatabaseProcessor {
+            pool: self.pool.clone(),
+        };
+        let old_transfers = processor
+            .process(GetOldUnmatchedTrc20TransferIds { token })
+            .await?;
 
         if old_transfers.is_empty() {
             return Ok(());
         }
 
         // Batch update all transfers at once
-        Trc20TokenTransfer::mark_no_matched_deposit_many(&self.pool, &old_transfers).await?;
+        processor
+            .process(MarkTrc20TransfersNoMatchedDeposit {
+                transfer_ids: old_transfers.clone(),
+            })
+            .await?;
 
         // Emit webhook events for each unknown transfer
         for transfer_id in old_transfers {

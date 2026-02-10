@@ -13,6 +13,7 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # Framework
+kanau = "0.5"
 sqlx = { version = "0.8", features = [
     "runtime-tokio",
     "tls-rustls",

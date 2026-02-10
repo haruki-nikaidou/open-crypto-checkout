@@ -1,4 +1,6 @@
 use crate::entities::StablecoinName;
+use crate::framework::DatabaseProcessor;
+use kanau::processor::Processor;
 
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct Trc20PendingDeposit {
@@ -22,11 +24,19 @@ pub struct Trc20PendingDepositMatch {
     pub started_at_timestamp: i64,
 }
 
-impl Trc20PendingDeposit {
-    /// Get pending deposits for matching with transfers.
-    pub async fn get_for_matching(
-        pool: &sqlx::PgPool,
-        token: StablecoinName,
+#[derive(Debug, Clone)]
+/// Get pending deposits for matching with transfers.
+pub struct GetTrc20DepositsForMatching {
+    pub token: StablecoinName,
+}
+
+impl Processor<GetTrc20DepositsForMatching> for DatabaseProcessor {
+    type Output = Vec<Trc20PendingDepositMatch>;
+    type Error = sqlx::Error;
+    #[tracing::instrument(skip_all, err, name = "SQL:GetTrc20DepositsForMatching")]
+    async fn process(
+        &self,
+        query: GetTrc20DepositsForMatching,
     ) -> Result<Vec<Trc20PendingDepositMatch>, sqlx::Error> {
         let deposits = sqlx::query_as!(
             Trc20PendingDepositMatch,
@@ -42,13 +52,15 @@ impl Trc20PendingDeposit {
             WHERE d.token_name = $1
               AND o.status = 'pending'
             "#,
-            token as StablecoinName,
+            query.token as StablecoinName,
         )
-        .fetch_all(pool)
+        .fetch_all(&self.pool)
         .await?;
         Ok(deposits)
     }
+}
 
+impl Trc20PendingDeposit {
     /// Delete pending deposits for an order except for one (the matched one), within a transaction.
     pub async fn delete_for_order_except_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,

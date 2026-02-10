@@ -1,3 +1,5 @@
+use crate::framework::DatabaseProcessor;
+use kanau::processor::Processor;
 use ocrch_sdk::objects::OrderStatus as SdkOrderStatus;
 use uuid::Uuid;
 
@@ -59,12 +61,17 @@ pub struct OrderForWebhookRetry {
     pub webhook_retry_count: i32,
 }
 
-impl OrderRecord {
-    /// Get an order by its ID.
-    pub async fn get_by_id(
-        pool: &sqlx::PgPool,
-        order_id: Uuid,
-    ) -> Result<Option<OrderRecord>, sqlx::Error> {
+#[derive(Debug, Clone)]
+/// Get an order by its ID.
+pub struct GetOrderRecordById {
+    pub order_id: Uuid,
+}
+
+impl Processor<GetOrderRecordById> for DatabaseProcessor {
+    type Output = Option<OrderRecord>;
+    type Error = sqlx::Error;
+    #[tracing::instrument(skip_all, err, name = "SQL:GetOrderRecordById")]
+    async fn process(&self, query: GetOrderRecordById) -> Result<Option<OrderRecord>, sqlx::Error> {
         let order = sqlx::query_as!(
             OrderRecord,
             r#"
@@ -81,36 +88,50 @@ impl OrderRecord {
             FROM order_records
             WHERE order_id = $1
             "#,
-            order_id,
+            query.order_id,
         )
-        .fetch_optional(pool)
+        .fetch_optional(&self.pool)
         .await?;
         Ok(order)
     }
+}
 
-    /// Mark a webhook as successfully delivered.
-    pub async fn mark_webhook_success(
-        pool: &sqlx::PgPool,
-        order_id: Uuid,
-    ) -> Result<(), sqlx::Error> {
+#[derive(Debug, Clone)]
+/// Mark a webhook as successfully delivered.
+pub struct MarkOrderWebhookSuccess {
+    pub order_id: Uuid,
+}
+
+impl Processor<MarkOrderWebhookSuccess> for DatabaseProcessor {
+    type Output = ();
+    type Error = sqlx::Error;
+    #[tracing::instrument(skip_all, err, name = "SQL:MarkOrderWebhookSuccess")]
+    async fn process(&self, cmd: MarkOrderWebhookSuccess) -> Result<(), sqlx::Error> {
         sqlx::query!(
             r#"
             UPDATE order_records
             SET webhook_success_at = NOW()
             WHERE order_id = $1
             "#,
-            order_id,
+            cmd.order_id,
         )
-        .execute(pool)
+        .execute(&self.pool)
         .await?;
         Ok(())
     }
+}
 
-    /// Increment the retry count for a failed webhook delivery.
-    pub async fn increment_webhook_retry_count(
-        pool: &sqlx::PgPool,
-        order_id: Uuid,
-    ) -> Result<(), sqlx::Error> {
+#[derive(Debug, Clone)]
+/// Increment the retry count for a failed webhook delivery.
+pub struct IncrementOrderWebhookRetryCount {
+    pub order_id: Uuid,
+}
+
+impl Processor<IncrementOrderWebhookRetryCount> for DatabaseProcessor {
+    type Output = ();
+    type Error = sqlx::Error;
+    #[tracing::instrument(skip_all, err, name = "SQL:IncrementOrderWebhookRetryCount")]
+    async fn process(&self, cmd: IncrementOrderWebhookRetryCount) -> Result<(), sqlx::Error> {
         sqlx::query!(
             r#"
             UPDATE order_records
@@ -119,24 +140,34 @@ impl OrderRecord {
                 webhook_last_tried_at = NOW()
             WHERE order_id = $1
             "#,
-            order_id,
+            cmd.order_id,
         )
-        .execute(pool)
+        .execute(&self.pool)
         .await?;
         Ok(())
     }
+}
 
-    /// Get orders that need webhook retry based on exponential backoff.
-    ///
-    /// Returns orders that:
-    /// - Have a status change (not pending)
-    /// - Haven't been successfully delivered
-    /// - Haven't exceeded max retries
-    /// - Are due for retry based on exponential backoff (2^retry_count seconds)
-    pub async fn get_orders_for_webhook_retry(
-        pool: &sqlx::PgPool,
-        max_retry_count: i32,
-        limit: i64,
+#[derive(Debug, Clone)]
+/// Get orders that need webhook retry based on exponential backoff.
+///
+/// Returns orders that:
+/// - Have a status change (not pending)
+/// - Haven't been successfully delivered
+/// - Haven't exceeded max retries
+/// - Are due for retry based on exponential backoff (2^retry_count seconds)
+pub struct GetOrdersForWebhookRetry {
+    pub max_retry_count: i32,
+    pub limit: i64,
+}
+
+impl Processor<GetOrdersForWebhookRetry> for DatabaseProcessor {
+    type Output = Vec<OrderForWebhookRetry>;
+    type Error = sqlx::Error;
+    #[tracing::instrument(skip_all, err, name = "SQL:GetOrdersForWebhookRetry")]
+    async fn process(
+        &self,
+        query: GetOrdersForWebhookRetry,
     ) -> Result<Vec<OrderForWebhookRetry>, sqlx::Error> {
         let orders = sqlx::query_as!(
             OrderForWebhookRetry,
@@ -158,34 +189,43 @@ impl OrderRecord {
               )
             LIMIT $2
             "#,
-            max_retry_count,
-            limit,
+            query.max_retry_count,
+            query.limit,
         )
-        .fetch_all(pool)
+        .fetch_all(&self.pool)
         .await?;
         Ok(orders)
     }
+}
 
-    /// Update the status of an order.
-    pub async fn update_status(
-        pool: &sqlx::PgPool,
-        order_id: Uuid,
-        status: OrderStatus,
-    ) -> Result<(), sqlx::Error> {
+#[derive(Debug, Clone)]
+/// Update the status of an order.
+pub struct UpdateOrderStatus {
+    pub order_id: Uuid,
+    pub status: OrderStatus,
+}
+
+impl Processor<UpdateOrderStatus> for DatabaseProcessor {
+    type Output = ();
+    type Error = sqlx::Error;
+    #[tracing::instrument(skip_all, err, name = "SQL:UpdateOrderStatus")]
+    async fn process(&self, cmd: UpdateOrderStatus) -> Result<(), sqlx::Error> {
         sqlx::query!(
             r#"
             UPDATE order_records
             SET status = $1
             WHERE order_id = $2
             "#,
-            status as OrderStatus,
-            order_id,
+            cmd.status as OrderStatus,
+            cmd.order_id,
         )
-        .execute(pool)
+        .execute(&self.pool)
         .await?;
         Ok(())
     }
+}
 
+impl OrderRecord {
     /// Update the status of an order within a transaction.
     pub async fn update_status_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,

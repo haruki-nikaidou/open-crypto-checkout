@@ -10,10 +10,16 @@
 
 use crate::entities::StablecoinName;
 use crate::entities::erc20_pending_deposit::EtherScanChain;
-use crate::entities::erc20_transfer::{Erc20TokenTransfer, Erc20TransferInsert};
-use crate::entities::trc20_transfer::{Trc20TokenTransfer, Trc20TransferInsert};
+use crate::entities::erc20_transfer::{
+    Erc20TransferInsert, GetErc20TokenTransSyncCursor, InsertManyErc20TokenTransfers,
+};
+use crate::entities::trc20_transfer::{
+    GetTrc20TokenTransSyncCursor, InsertManyTrc20TokenTransfers, Trc20TransferInsert,
+};
 use crate::events::{BlockchainTarget, MatchTick, MatchTickSender, PoolingTickReceiver};
+use crate::framework::DatabaseProcessor;
 use async_trait::async_trait;
+use kanau::processor::Processor;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use thiserror::Error;
@@ -146,17 +152,6 @@ impl Erc20BlockchainSync {
         Ok(response.result)
     }
 
-    /// Get the cursor block number from the materialized view.
-    ///
-    /// The cursor implements the algorithm:
-    /// 1. If there are unconfirmed transfers within the last 1 day, return the earliest block number
-    /// 2. Otherwise, return the latest block number
-    /// 3. If no transfers exist, return None
-    async fn get_cursor_block(&self, pool: &PgPool) -> Result<Option<i64>, SyncError> {
-        let cursor = Erc20TokenTransfer::cursor(pool, self.chain, self.token).await?;
-        Ok(cursor.map(|c| c.cursor_block_number))
-    }
-
     /// Fetch the block number of a transaction from the EtherScan API.
     async fn fetch_tx_block_number(&self, tx_hash: &str) -> Result<i64, SyncError> {
         #[derive(Debug, serde::Deserialize)]
@@ -196,7 +191,14 @@ impl Erc20BlockchainSync {
     /// Get the starting block for sync, considering database cursor and starting_tx fallback.
     async fn get_start_block(&self, pool: &PgPool) -> Result<i64, SyncError> {
         // First, check if we have a cursor from the materialized view
-        if let Some(cursor_block) = self.get_cursor_block(pool).await? {
+        let processor = DatabaseProcessor { pool: pool.clone() };
+        let cursor = processor
+            .process(GetErc20TokenTransSyncCursor {
+                chain: self.chain,
+                token: self.token,
+            })
+            .await?;
+        if let Some(cursor_block) = cursor.map(|c| c.cursor_block_number) {
             return Ok(cursor_block);
         }
 
@@ -274,7 +276,10 @@ impl Erc20BlockchainSync {
             return Ok(0);
         }
 
-        let inserted = Erc20TokenTransfer::insert_many(pool, &inserts).await?;
+        let processor = DatabaseProcessor { pool: pool.clone() };
+        let inserted = processor
+            .process(InsertManyErc20TokenTransfers { transfers: inserts })
+            .await?;
         Ok(inserted as u32)
     }
 }
@@ -400,7 +405,10 @@ impl Trc20BlockchainSync {
     /// 2. Otherwise, return the latest timestamp
     /// 3. If no transfers exist, return None
     async fn get_cursor_timestamp(&self, pool: &PgPool) -> Result<Option<i64>, SyncError> {
-        let cursor = Trc20TokenTransfer::cursor(pool, self.token).await?;
+        let processor = DatabaseProcessor { pool: pool.clone() };
+        let cursor = processor
+            .process(GetTrc20TokenTransSyncCursor { token: self.token })
+            .await?;
         Ok(cursor.map(|c| c.cursor_block_timestamp))
     }
 
@@ -503,7 +511,10 @@ impl Trc20BlockchainSync {
             return Ok(0);
         }
 
-        let inserted = Trc20TokenTransfer::insert_many(pool, &inserts).await?;
+        let processor = DatabaseProcessor { pool: pool.clone() };
+        let inserted = processor
+            .process(InsertManyTrc20TokenTransfers { transfers: inserts })
+            .await?;
         Ok(inserted as u32)
     }
 }

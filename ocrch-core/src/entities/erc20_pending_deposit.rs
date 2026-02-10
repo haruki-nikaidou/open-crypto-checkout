@@ -1,4 +1,6 @@
 use crate::entities::StablecoinName;
+use crate::framework::DatabaseProcessor;
+use kanau::processor::Processor;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Erc20PendingDeposit {
@@ -92,10 +94,12 @@ pub struct Erc20PendingDepositMatch {
     pub started_at_timestamp: i64,
 }
 
-impl Erc20PendingDeposit {
-    /// Insert a new pending deposit.
-    pub async fn insert_new(
-        pool: &sqlx::PgPool,
+impl Processor<Erc20PendingDepositInsert> for DatabaseProcessor {
+    type Output = Erc20PendingDeposit;
+    type Error = sqlx::Error;
+    #[tracing::instrument(skip_all, err, name = "SQL:Erc20PendingDepositInsert")]
+    async fn process(
+        &self,
         insert: Erc20PendingDepositInsert,
     ) -> Result<Erc20PendingDeposit, sqlx::Error> {
         let deposit = sqlx::query_as!(
@@ -121,16 +125,25 @@ impl Erc20PendingDeposit {
             insert.wallet_address as String,
             insert.value,
         )
-        .fetch_one(pool)
-        .await?;
+            .fetch_one(&self.pool)
+            .await?;
         Ok(deposit)
     }
+}
 
-    /// Get pending deposits for matching with transfers.
-    pub async fn get_for_matching(
-        pool: &sqlx::PgPool,
-        chain: EtherScanChain,
-        token: StablecoinName,
+#[derive(Debug, Clone)]
+pub struct GetErc20DepositsForMatching {
+    pub chain: EtherScanChain,
+    pub token: StablecoinName,
+}
+
+impl Processor<GetErc20DepositsForMatching> for DatabaseProcessor {
+    type Output = Vec<Erc20PendingDepositMatch>;
+    type Error = sqlx::Error;
+    #[tracing::instrument(skip_all, err, name = "SQL:GetErc20DepositsForMatching")]
+    async fn process(
+        &self,
+        query: GetErc20DepositsForMatching,
     ) -> Result<Vec<Erc20PendingDepositMatch>, sqlx::Error> {
         let deposits = sqlx::query_as!(
             Erc20PendingDepositMatch,
@@ -147,50 +160,16 @@ impl Erc20PendingDeposit {
               AND d.token_name = $2
               AND o.status = 'pending'
             "#,
-            chain as EtherScanChain,
-            token as StablecoinName,
+            query.chain as EtherScanChain,
+            query.token as StablecoinName,
         )
-        .fetch_all(pool)
+        .fetch_all(&self.pool)
         .await?;
         Ok(deposits)
     }
+}
 
-    /// Delete pending deposits for an order except for one (the matched one), within a transaction.
-    pub async fn delete_for_order_except_tx(
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        order_id: uuid::Uuid,
-        except_id: i64,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query!(
-            r#"
-            DELETE FROM erc20_pending_deposits
-            WHERE "order" = $1 AND id != $2
-            "#,
-            order_id,
-            except_id,
-        )
-        .execute(&mut **tx)
-        .await?;
-        Ok(())
-    }
-
-    /// Delete all pending deposits for an order within a transaction.
-    pub async fn delete_for_order_tx(
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        order_id: uuid::Uuid,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query!(
-            r#"
-            DELETE FROM erc20_pending_deposits
-            WHERE "order" = $1
-            "#,
-            order_id,
-        )
-        .execute(&mut **tx)
-        .await?;
-        Ok(())
-    }
-
+impl Erc20PendingDeposit {
     /// Delete pending deposits for multiple orders, each keeping one (the matched one).
     ///
     /// Uses `UNNEST` to batch-delete in a single SQL statement.

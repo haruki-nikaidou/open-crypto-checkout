@@ -10,8 +10,13 @@
 //! Note: The actual signature generation is delegated to the caller via a closure.
 //! This keeps cryptographic operations in `ocrch-sdk` where they belong.
 
-use crate::entities::order_records::{OrderRecord, OrderStatus};
+use crate::entities::order_records::{
+    GetOrderRecordById, GetOrdersForWebhookRetry, IncrementOrderWebhookRetryCount,
+    MarkOrderWebhookSuccess, OrderStatus,
+};
 use crate::events::{BlockchainTarget, WebhookEvent, WebhookEventReceiver};
+use crate::framework::DatabaseProcessor;
+use kanau::processor::Processor;
 use ocrch_sdk::objects::{OrderStatus as SdkOrderStatus, OrderStatusChangedPayload};
 use sqlx::PgPool;
 use thiserror::Error;
@@ -149,7 +154,10 @@ impl WebhookSender {
         new_status: OrderStatus,
     ) -> Result<(), WebhookError> {
         // Get order info
-        let Some(order_info) = OrderRecord::get_by_id(&self.pool, order_id).await? else {
+        let processor = DatabaseProcessor {
+            pool: self.pool.clone(),
+        };
+        let Some(order_info) = processor.process(GetOrderRecordById { order_id }).await? else {
             return Err(WebhookError::OrderNotFound(order_id));
         };
 
@@ -249,13 +257,23 @@ impl WebhookSender {
 
     /// Mark a webhook as successfully delivered.
     async fn mark_webhook_success(&self, order_id: Uuid) -> Result<(), WebhookError> {
-        OrderRecord::mark_webhook_success(&self.pool, order_id).await?;
+        let processor = DatabaseProcessor {
+            pool: self.pool.clone(),
+        };
+        processor
+            .process(MarkOrderWebhookSuccess { order_id })
+            .await?;
         Ok(())
     }
 
     /// Increment the retry count for a failed webhook.
     async fn increment_retry_count(&self, order_id: Uuid) -> Result<(), WebhookError> {
-        OrderRecord::increment_webhook_retry_count(&self.pool, order_id).await?;
+        let processor = DatabaseProcessor {
+            pool: self.pool.clone(),
+        };
+        processor
+            .process(IncrementOrderWebhookRetryCount { order_id })
+            .await?;
         Ok(())
     }
 
@@ -293,8 +311,13 @@ impl WebhookSender {
         http_client: &reqwest::Client,
     ) -> Result<(), WebhookError> {
         // Find orders that need webhook retry
-        let orders_to_retry =
-            OrderRecord::get_orders_for_webhook_retry(pool, MAX_RETRY_COUNT as i32, 10).await?;
+        let processor = DatabaseProcessor { pool: pool.clone() };
+        let orders_to_retry = processor
+            .process(GetOrdersForWebhookRetry {
+                max_retry_count: MAX_RETRY_COUNT as i32,
+                limit: 10,
+            })
+            .await?;
 
         for order in orders_to_retry {
             let sdk_status: SdkOrderStatus = order.status.into();
@@ -327,7 +350,11 @@ impl WebhookSender {
 
             match request.send().await {
                 Ok(response) if response.status().is_success() => {
-                    OrderRecord::mark_webhook_success(pool, order.order_id).await?;
+                    processor
+                        .process(MarkOrderWebhookSuccess {
+                            order_id: order.order_id,
+                        })
+                        .await?;
 
                     info!(
                         order_id = %order.order_id,
@@ -337,7 +364,11 @@ impl WebhookSender {
                 }
                 Ok(response) => {
                     let status = response.status();
-                    OrderRecord::increment_webhook_retry_count(pool, order.order_id).await?;
+                    processor
+                        .process(IncrementOrderWebhookRetryCount {
+                            order_id: order.order_id,
+                        })
+                        .await?;
 
                     warn!(
                         order_id = %order.order_id,
@@ -347,7 +378,11 @@ impl WebhookSender {
                     );
                 }
                 Err(e) => {
-                    OrderRecord::increment_webhook_retry_count(pool, order.order_id).await?;
+                    processor
+                        .process(IncrementOrderWebhookRetryCount {
+                            order_id: order.order_id,
+                        })
+                        .await?;
 
                     warn!(
                         order_id = %order.order_id,

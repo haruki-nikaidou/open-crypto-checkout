@@ -1,5 +1,7 @@
 use crate::entities::erc20_pending_deposit::EtherScanChain;
 use crate::entities::{StablecoinName, TransferStatus};
+use crate::framework::DatabaseProcessor;
+use kanau::processor::Processor;
 use rust_decimal::Decimal;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,17 +58,25 @@ pub struct Erc20SyncCursor {
     pub has_pending_confirmation: bool,
 }
 
-impl Erc20TokenTransfer {
-    /// Get the sync cursor from the materialized view for a chain-token pair.
-    ///
-    /// The cursor implements the algorithm:
-    /// 1. If there are unconfirmed transfers within the last 1 day, return the earliest block number
-    /// 2. Otherwise, return the latest block number
-    /// 3. If no transfers exist, return None
-    pub async fn cursor(
-        pool: &sqlx::PgPool,
-        chain: EtherScanChain,
-        token_name: StablecoinName,
+#[derive(Debug, Clone)]
+/// Get the sync cursor from the materialized view for a chain-token pair.
+///
+/// The cursor implements the algorithm:
+/// 1. If there are unconfirmed transfers within the last 1 day, return the earliest block number
+/// 2. Otherwise, return the latest block number
+/// 3. If no transfers exist, return None
+pub struct GetErc20TokenTransSyncCursor {
+    pub chain: EtherScanChain,
+    pub token: StablecoinName,
+}
+
+impl Processor<GetErc20TokenTransSyncCursor> for DatabaseProcessor {
+    type Output = Option<Erc20SyncCursor>;
+    type Error = sqlx::Error;
+    #[tracing::instrument(skip_all, err, name = "SQL:GetErc20TokenTransSyncCursor")]
+    async fn process(
+        &self,
+        query: GetErc20TokenTransSyncCursor,
     ) -> Result<Option<Erc20SyncCursor>, sqlx::Error> {
         let cursor = sqlx::query_as!(
             Erc20SyncCursor,
@@ -79,51 +89,30 @@ impl Erc20TokenTransfer {
             FROM erc20_sync_cursor
             WHERE chain = $1 AND token_name = $2
             "#,
-            chain as EtherScanChain,
-            token_name as StablecoinName,
+            query.chain as EtherScanChain,
+            query.token as StablecoinName,
         )
-        .fetch_optional(pool)
+        .fetch_optional(&self.pool)
         .await?;
         Ok(cursor)
     }
+}
 
-    /// Insert a new transfer. Returns true if a new row was inserted (not a duplicate).
-    ///
-    /// Uses ON CONFLICT DO NOTHING to ensure idempotency.
-    pub async fn insert(
-        pool: &sqlx::PgPool,
-        transfer: &Erc20TransferInsert,
-    ) -> Result<bool, sqlx::Error> {
-        let result = sqlx::query!(
-            r#"
-            INSERT INTO erc20_token_transfers 
-            (token_name, chain, from_address, to_address, txn_hash, value, block_number, block_timestamp)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            ON CONFLICT (txn_hash, chain) DO NOTHING
-            "#,
-            transfer.token_name as StablecoinName,
-            transfer.chain as EtherScanChain,
-            transfer.from_address,
-            transfer.to_address,
-            transfer.txn_hash,
-            transfer.value,
-            transfer.block_number,
-            transfer.block_timestamp,
-        )
-        .execute(pool)
-        .await?;
-        Ok(result.rows_affected() > 0)
-    }
+#[derive(Debug, Clone)]
+/// Insert multiple transfers in a single query.
+///
+/// Uses QueryBuilder for efficient bulk insert with ON CONFLICT DO NOTHING.
+/// Returns the number of rows actually inserted (excluding duplicates).
+pub struct InsertManyErc20TokenTransfers {
+    pub transfers: Vec<Erc20TransferInsert>,
+}
 
-    /// Insert multiple transfers in a single query.
-    ///
-    /// Uses QueryBuilder for efficient bulk insert with ON CONFLICT DO NOTHING.
-    /// Returns the number of rows actually inserted (excluding duplicates).
-    pub async fn insert_many(
-        pool: &sqlx::PgPool,
-        transfers: &[Erc20TransferInsert],
-    ) -> Result<u64, sqlx::Error> {
-        if transfers.is_empty() {
+impl Processor<InsertManyErc20TokenTransfers> for DatabaseProcessor {
+    type Output = u64;
+    type Error = sqlx::Error;
+    #[tracing::instrument(skip_all, err, name = "SQL:InsertManyErc20TokenTransfers")]
+    async fn process(&self, insert: InsertManyErc20TokenTransfers) -> Result<u64, sqlx::Error> {
+        if insert.transfers.is_empty() {
             return Ok(0);
         }
 
@@ -132,12 +121,12 @@ impl Erc20TokenTransfer {
             (token_name, chain, from_address, to_address, txn_hash, value, block_number, block_timestamp) ",
         );
 
-        query_builder.push_values(transfers, |mut b, transfer| {
-            b.push_bind(transfer.token_name as StablecoinName)
-                .push_bind(transfer.chain as EtherScanChain)
-                .push_bind(&transfer.from_address)
-                .push_bind(&transfer.to_address)
-                .push_bind(&transfer.txn_hash)
+        query_builder.push_values(insert.transfers, |mut b, transfer| {
+            b.push_bind(transfer.token_name)
+                .push_bind(transfer.chain)
+                .push_bind(transfer.from_address)
+                .push_bind(transfer.to_address)
+                .push_bind(transfer.txn_hash)
                 .push_bind(transfer.value)
                 .push_bind(transfer.block_number)
                 .push_bind(transfer.block_timestamp);
@@ -145,16 +134,27 @@ impl Erc20TokenTransfer {
 
         query_builder.push(" ON CONFLICT (txn_hash, chain) DO NOTHING");
 
-        let result = query_builder.build().execute(pool).await?;
+        let result = query_builder.build().execute(&self.pool).await?;
         Ok(result.rows_affected())
     }
+}
 
-    /// Get unmatched transfers that are waiting for a deposit match.
-    pub async fn get_unmatched(
-        pool: &sqlx::PgPool,
-        chain: EtherScanChain,
-        token: StablecoinName,
+#[derive(Debug, Clone)]
+/// Get unmatched transfers that are waiting for a deposit match.
+pub struct GetErc20TokenTransfersUnmatched {
+    pub chain: EtherScanChain,
+    pub token: StablecoinName,
+}
+
+impl Processor<GetErc20TokenTransfersUnmatched> for DatabaseProcessor {
+    type Output = Vec<Erc20UnmatchedTransfer>;
+    type Error = sqlx::Error;
+    #[tracing::instrument(skip_all, err, name = "SQL:GetErc20TokenTransfersUnmatched")]
+    async fn process(
+        &self,
+        query: GetErc20TokenTransfersUnmatched,
     ) -> Result<Vec<Erc20UnmatchedTransfer>, sqlx::Error> {
+        let GetErc20TokenTransfersUnmatched { chain, token } = query;
         let transfers = sqlx::query_as!(
             Erc20UnmatchedTransfer,
             r#"
@@ -173,34 +173,79 @@ impl Erc20TokenTransfer {
             chain as EtherScanChain,
             token as StablecoinName,
         )
-        .fetch_all(pool)
+        .fetch_all(&self.pool)
         .await?;
         Ok(transfers)
     }
+}
 
-    /// Mark a transfer as matched with a fulfillment ID within a transaction.
-    pub async fn mark_matched_tx(
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        transfer_id: i64,
-        fulfillment_id: i64,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query!(
+#[derive(Debug, Clone)]
+/// Get IDs of old unmatched transfers (older than 1 hour) for marking as unknown.
+pub struct GetOldUnmatchedErc20TransferIds {
+    pub chain: EtherScanChain,
+    pub token: StablecoinName,
+}
+
+impl Processor<GetOldUnmatchedErc20TransferIds> for DatabaseProcessor {
+    type Output = Vec<i64>;
+    type Error = sqlx::Error;
+    #[tracing::instrument(skip_all, err, name = "SQL:GetOldUnmatchedErc20TransferIds")]
+    async fn process(
+        &self,
+        query: GetOldUnmatchedErc20TransferIds,
+    ) -> Result<Vec<i64>, sqlx::Error> {
+        let ids = sqlx::query_scalar!(
+            r#"
+            SELECT id
+            FROM erc20_token_transfers
+            WHERE chain = $1 
+              AND token_name = $2
+              AND status = 'waiting_for_match'
+              AND blockchain_confirmed = true
+              AND created_at < NOW() - INTERVAL '1 hour'
+            "#,
+            query.chain as EtherScanChain,
+            query.token as StablecoinName,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(ids)
+    }
+}
+
+#[derive(Debug, Clone)]
+/// Mark multiple transfers as having no matched deposit in a single query.
+///
+/// Returns the number of rows updated.
+pub struct MarkErc20TransfersNoMatchedDeposit {
+    pub transfer_ids: Vec<i64>,
+}
+
+impl Processor<MarkErc20TransfersNoMatchedDeposit> for DatabaseProcessor {
+    type Output = u64;
+    type Error = sqlx::Error;
+    #[tracing::instrument(skip_all, err, name = "SQL:MarkErc20TransfersNoMatchedDeposit")]
+    async fn process(&self, cmd: MarkErc20TransfersNoMatchedDeposit) -> Result<u64, sqlx::Error> {
+        if cmd.transfer_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let result = sqlx::query!(
             r#"
             UPDATE erc20_token_transfers
-            SET status = 'matched', fulfillment_id = $1
-            WHERE id = $2
+            SET status = 'no_matched_deposit'
+            WHERE id = ANY($1)
             "#,
-            fulfillment_id,
-            transfer_id,
+            &cmd.transfer_ids,
         )
-        .execute(&mut **tx)
+        .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(result.rows_affected())
     }
+}
 
+impl Erc20TokenTransfer {
     /// Mark multiple transfers as matched with their fulfillment IDs in a single query.
-    ///
-    /// Uses `UNNEST` to batch-update all rows in one SQL statement.
     pub async fn mark_matched_many_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         transfer_ids: &[i64],
@@ -221,72 +266,6 @@ impl Erc20TokenTransfer {
         .bind(transfer_ids)
         .bind(fulfillment_ids)
         .execute(&mut **tx)
-        .await?;
-        Ok(result.rows_affected())
-    }
-
-    /// Get IDs of old unmatched transfers (older than 1 hour) for marking as unknown.
-    pub async fn get_old_unmatched_ids(
-        pool: &sqlx::PgPool,
-        chain: EtherScanChain,
-        token: StablecoinName,
-    ) -> Result<Vec<i64>, sqlx::Error> {
-        let ids = sqlx::query_scalar!(
-            r#"
-            SELECT id
-            FROM erc20_token_transfers
-            WHERE chain = $1 
-              AND token_name = $2
-              AND status = 'waiting_for_match'
-              AND blockchain_confirmed = true
-              AND created_at < NOW() - INTERVAL '1 hour'
-            "#,
-            chain as EtherScanChain,
-            token as StablecoinName,
-        )
-        .fetch_all(pool)
-        .await?;
-        Ok(ids)
-    }
-
-    /// Mark a transfer as having no matched deposit.
-    pub async fn mark_no_matched_deposit(
-        pool: &sqlx::PgPool,
-        transfer_id: i64,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query!(
-            r#"
-            UPDATE erc20_token_transfers
-            SET status = 'no_matched_deposit'
-            WHERE id = $1
-            "#,
-            transfer_id,
-        )
-        .execute(pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Mark multiple transfers as having no matched deposit in a single query.
-    ///
-    /// Returns the number of rows updated.
-    pub async fn mark_no_matched_deposit_many(
-        pool: &sqlx::PgPool,
-        transfer_ids: &[i64],
-    ) -> Result<u64, sqlx::Error> {
-        if transfer_ids.is_empty() {
-            return Ok(0);
-        }
-
-        let result = sqlx::query!(
-            r#"
-            UPDATE erc20_token_transfers
-            SET status = 'no_matched_deposit'
-            WHERE id = ANY($1)
-            "#,
-            transfer_ids,
-        )
-        .execute(pool)
         .await?;
         Ok(result.rows_affected())
     }
