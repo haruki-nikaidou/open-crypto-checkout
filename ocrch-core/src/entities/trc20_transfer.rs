@@ -270,7 +270,7 @@ pub struct HandleTrc20MatchedTrans {
 impl Processor<HandleTrc20MatchedTrans> for DatabaseProcessor {
     type Output = ();
     type Error = sqlx::Error;
-    #[tracing::instrument(skip_all, err, name = "SQL:HandleTrc20MatchedTrans")]
+    #[tracing::instrument(skip_all, err, name = "SQL-Transaction:HandleTrc20MatchedTrans")]
     async fn process(&self, cmd: HandleTrc20MatchedTrans) -> Result<(), sqlx::Error> {
         let mut tx = self.pool.begin().await?;
 
