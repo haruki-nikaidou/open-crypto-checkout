@@ -53,9 +53,7 @@ pub enum WebhookError {
 
 /// WebhookSender handles delivering webhook events to merchant endpoints.
 pub struct WebhookSender {
-    pool: PgPool,
-    webhook_rx: WebhookEventReceiver,
-    shutdown_rx: watch::Receiver<bool>,
+    processor: DatabaseProcessor,
     http_client: reqwest::Client,
 }
 
@@ -64,18 +62,10 @@ impl WebhookSender {
     ///
     /// # Arguments
     ///
-    /// * `pool` - Database connection pool
-    /// * `webhook_rx` - Receiver for WebhookEvent events
-    /// * `shutdown_rx` - Receiver for shutdown signal
-    pub fn new(
-        pool: PgPool,
-        webhook_rx: WebhookEventReceiver,
-        shutdown_rx: watch::Receiver<bool>,
-    ) -> Self {
+    /// * `processor` - Database processor for querying/updating order records
+    pub fn new(processor: DatabaseProcessor) -> Self {
         Self {
-            pool,
-            webhook_rx,
-            shutdown_rx,
+            processor,
             http_client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
@@ -84,13 +74,17 @@ impl WebhookSender {
     }
 
     /// Run the WebhookSender.
-    pub async fn run(mut self) {
+    pub async fn run(
+        self,
+        mut shutdown_rx: watch::Receiver<bool>,
+        mut webhook_rx: WebhookEventReceiver,
+    ) {
         info!("WebhookSender started");
 
         // Also spawn a background task to retry failed webhooks
-        let pool = self.pool.clone();
+        let pool = self.processor.pool.clone();
         let http_client = self.http_client.clone();
-        let mut retry_shutdown_rx = self.shutdown_rx.clone();
+        let mut retry_shutdown_rx = shutdown_rx.clone();
 
         let retry_handle = tokio::spawn(async move {
             Self::retry_failed_webhooks_loop(pool, http_client, &mut retry_shutdown_rx).await;
@@ -101,18 +95,18 @@ impl WebhookSender {
                 biased;
 
                 // Check for shutdown
-                _ = self.shutdown_rx.changed() => {
-                    if *self.shutdown_rx.borrow() {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
                         info!("WebhookSender received shutdown signal");
                         break;
                     }
                 }
 
                 // Receive WebhookEvent events
-                Some(event) = self.webhook_rx.recv() => {
+                Some(event) = webhook_rx.recv() => {
                     debug!(event = ?event, "Received WebhookEvent");
 
-                    if let Err(e) = self.process_event(event).await {
+                    if let Err(e) = self.process(event).await {
                         error!(error = %e, "Failed to process WebhookEvent");
                     }
                 }
@@ -130,23 +124,6 @@ impl WebhookSender {
         info!("WebhookSender shutdown complete");
     }
 
-    /// Process a webhook event.
-    async fn process_event(&self, event: WebhookEvent) -> Result<(), WebhookError> {
-        match event {
-            WebhookEvent::OrderStatusChanged {
-                order_id,
-                new_status,
-            } => self.send_order_status_webhook(order_id, new_status).await,
-            WebhookEvent::UnknownTransferReceived {
-                transfer_id,
-                blockchain,
-            } => {
-                self.send_unknown_transfer_webhook(transfer_id, blockchain)
-                    .await
-            }
-        }
-    }
-
     /// Send an order status change webhook.
     async fn send_order_status_webhook(
         &self,
@@ -154,10 +131,11 @@ impl WebhookSender {
         new_status: OrderStatus,
     ) -> Result<(), WebhookError> {
         // Get order info
-        let processor = DatabaseProcessor {
-            pool: self.pool.clone(),
-        };
-        let Some(order_info) = processor.process(GetOrderRecordById { order_id }).await? else {
+        let Some(order_info) = self
+            .processor
+            .process(GetOrderRecordById { order_id })
+            .await?
+        else {
             return Err(WebhookError::OrderNotFound(order_id));
         };
 
@@ -257,10 +235,7 @@ impl WebhookSender {
 
     /// Mark a webhook as successfully delivered.
     async fn mark_webhook_success(&self, order_id: Uuid) -> Result<(), WebhookError> {
-        let processor = DatabaseProcessor {
-            pool: self.pool.clone(),
-        };
-        processor
+        self.processor
             .process(MarkOrderWebhookSuccess { order_id })
             .await?;
         Ok(())
@@ -268,10 +243,7 @@ impl WebhookSender {
 
     /// Increment the retry count for a failed webhook.
     async fn increment_retry_count(&self, order_id: Uuid) -> Result<(), WebhookError> {
-        let processor = DatabaseProcessor {
-            pool: self.pool.clone(),
-        };
-        processor
+        self.processor
             .process(IncrementOrderWebhookRetryCount { order_id })
             .await?;
         Ok(())
@@ -395,6 +367,27 @@ impl WebhookSender {
         }
 
         Ok(())
+    }
+}
+
+impl Processor<WebhookEvent> for WebhookSender {
+    type Output = ();
+    type Error = WebhookError;
+
+    async fn process(&self, event: WebhookEvent) -> Result<(), WebhookError> {
+        match event {
+            WebhookEvent::OrderStatusChanged {
+                order_id,
+                new_status,
+            } => self.send_order_status_webhook(order_id, new_status).await,
+            WebhookEvent::UnknownTransferReceived {
+                transfer_id,
+                blockchain,
+            } => {
+                self.send_unknown_transfer_webhook(transfer_id, blockchain)
+                    .await
+            }
+        }
     }
 }
 

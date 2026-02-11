@@ -197,5 +197,4 @@ impl Erc20PendingDeposit {
         .await?;
         Ok(result.rows_affected())
     }
-
 }

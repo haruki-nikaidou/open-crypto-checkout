@@ -16,7 +16,9 @@ use crate::entities::erc20_transfer::{
 use crate::entities::trc20_transfer::{
     GetTrc20TokenTransSyncCursor, InsertManyTrc20TokenTransfers, Trc20TransferInsert,
 };
-use crate::events::{BlockchainTarget, MatchTick, MatchTickSender, PoolingTickReceiver};
+use crate::events::{
+    BlockchainTarget, MatchTick, MatchTickSender, PoolingTick, PoolingTickReceiver,
+};
 use crate::framework::DatabaseProcessor;
 use async_trait::async_trait;
 use kanau::processor::Processor;
@@ -580,31 +582,21 @@ impl BlockchainSync for Trc20BlockchainSync {
 pub struct BlockchainSyncRunner<S: BlockchainSync> {
     sync: S,
     pool: PgPool,
-    tick_rx: PoolingTickReceiver,
-    match_tx: MatchTickSender,
-    shutdown_rx: watch::Receiver<bool>,
 }
 
 impl<S: BlockchainSync + 'static> BlockchainSyncRunner<S> {
     /// Create a new BlockchainSyncRunner.
-    pub fn new(
-        sync: S,
-        pool: PgPool,
-        tick_rx: PoolingTickReceiver,
-        match_tx: MatchTickSender,
-        shutdown_rx: watch::Receiver<bool>,
-    ) -> Self {
-        Self {
-            sync,
-            pool,
-            tick_rx,
-            match_tx,
-            shutdown_rx,
-        }
+    pub fn new(sync: S, pool: PgPool) -> Self {
+        Self { sync, pool }
     }
 
     /// Run the BlockchainSyncRunner.
-    pub async fn run(mut self) {
+    pub async fn run(
+        self,
+        mut shutdown_rx: watch::Receiver<bool>,
+        mut tick_rx: PoolingTickReceiver,
+        match_tx: MatchTickSender,
+    ) {
         let blockchain = self.sync.blockchain_target();
         let token = self.sync.token();
 
@@ -619,8 +611,8 @@ impl<S: BlockchainSync + 'static> BlockchainSyncRunner<S> {
                 biased;
 
                 // Check for shutdown
-                _ = self.shutdown_rx.changed() => {
-                    if *self.shutdown_rx.borrow() {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
                         info!(
                             blockchain = %blockchain,
                             token = ?token,
@@ -631,7 +623,7 @@ impl<S: BlockchainSync + 'static> BlockchainSyncRunner<S> {
                 }
 
                 // Receive PoolingTick events
-                Some(tick) = self.tick_rx.recv() => {
+                Some(tick) = tick_rx.recv() => {
                     // Verify this tick is for us
                     if tick.blockchain != blockchain || tick.token != token {
                         warn!(
@@ -644,24 +636,9 @@ impl<S: BlockchainSync + 'static> BlockchainSyncRunner<S> {
                         continue;
                     }
 
-                    // Perform sync
-                    match self.sync.sync(&self.pool).await {
-                        Ok(transfers_synced) => {
-                            debug!(
-                                blockchain = %blockchain,
-                                token = ?token,
-                                transfers_synced = transfers_synced,
-                                "Sync completed"
-                            );
-
-                            // Emit MatchTick
-                            let match_tick = MatchTick {
-                                blockchain,
-                                token,
-                                transfers_synced,
-                            };
-
-                            if let Err(e) = self.match_tx.send(match_tick).await {
+                    match self.process(tick).await {
+                        Ok(match_tick) => {
+                            if let Err(e) = match_tx.send(match_tick).await {
                                 error!(
                                     blockchain = %blockchain,
                                     token = ?token,
@@ -686,7 +663,7 @@ impl<S: BlockchainSync + 'static> BlockchainSyncRunner<S> {
                                 transfers_synced: 0,
                             };
 
-                            let _ = self.match_tx.send(match_tick).await;
+                            let _ = match_tx.send(match_tick).await;
                         }
                     }
                 }
@@ -707,6 +684,31 @@ impl<S: BlockchainSync + 'static> BlockchainSyncRunner<S> {
             token = ?token,
             "BlockchainSyncRunner shutdown complete"
         );
+    }
+}
+
+impl<S: BlockchainSync + Send + Sync + 'static> Processor<PoolingTick> for BlockchainSyncRunner<S> {
+    type Output = MatchTick;
+    type Error = SyncError;
+
+    async fn process(&self, _tick: PoolingTick) -> Result<MatchTick, SyncError> {
+        let blockchain = self.sync.blockchain_target();
+        let token = self.sync.token();
+
+        let transfers_synced = self.sync.sync(&self.pool).await?;
+
+        debug!(
+            blockchain = %blockchain,
+            token = ?token,
+            transfers_synced = transfers_synced,
+            "Sync completed"
+        );
+
+        Ok(MatchTick {
+            blockchain,
+            token,
+            transfers_synced,
+        })
     }
 }
 
