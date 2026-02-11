@@ -82,7 +82,7 @@ pub struct PoolingTick {
 ///
 /// This triggers the OrderBookWatcher to attempt matching pending deposits
 /// with the newly synced transfers.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct MatchTick {
     /// The blockchain that was synced
     pub blockchain: BlockchainTarget,

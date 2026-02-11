@@ -32,7 +32,6 @@ use compact_str::CompactString;
 use itertools::{EitherOrBoth, Itertools};
 use kanau::processor::Processor;
 use rust_decimal::Decimal;
-use sqlx::PgPool;
 use thiserror::Error;
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
@@ -105,7 +104,6 @@ impl From<Trc20UnmatchedTransfer> for UnmatchedTransfer {
     }
 }
 
-/// A successful match between a transfer and a deposit, computed in memory.
 #[derive(Debug)]
 struct MatchResult {
     transfer_id: i64,
@@ -115,15 +113,17 @@ struct MatchResult {
 
 /// OrderBookWatcher handles matching pending deposits to blockchain transfers.
 pub struct OrderBookWatcher {
-    pub pool: PgPool,
-    pub match_rx: MatchTickReceiver,
-    pub webhook_tx: WebhookEventSender,
-    pub shutdown_rx: watch::Receiver<bool>,
+    pub processor: DatabaseProcessor,
 }
 
 impl OrderBookWatcher {
     /// Run the OrderBookWatcher.
-    pub async fn run(mut self) {
+    pub async fn run(
+        self,
+        mut shutdown_rx: watch::Receiver<bool>,
+        mut match_rx: MatchTickReceiver,
+        webhook_tx: WebhookEventSender,
+    ) {
         info!("OrderBookWatcher started");
 
         loop {
@@ -131,15 +131,15 @@ impl OrderBookWatcher {
                 biased;
 
                 // Check for shutdown
-                _ = self.shutdown_rx.changed() => {
-                    if *self.shutdown_rx.borrow() {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
                         info!("OrderBookWatcher received shutdown signal");
                         break;
                     }
                 }
 
                 // Receive MatchTick events
-                Some(tick) = self.match_rx.recv() => {
+                Some(tick) = match_rx.recv() => {
                     debug!(
                         blockchain = %tick.blockchain,
                         token = ?tick.token,
@@ -147,13 +147,25 @@ impl OrderBookWatcher {
                         "Received MatchTick"
                     );
 
-                    if let Err(e) = self.process_match_tick(&tick).await {
-                        error!(
-                            blockchain = %tick.blockchain,
-                            token = ?tick.token,
-                            error = %e,
-                            "Failed to process MatchTick"
-                        );
+                    match self.process(tick).await {
+                        Ok(events) => {
+                            for event in events {
+                                if let Err(e) = webhook_tx.send(event).await {
+                                    warn!(
+                                        error = %e,
+                                        "Failed to send WebhookEvent"
+                                    );
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            error!(
+                                blockchain = %tick.blockchain,
+                                token = ?tick.token,
+                                error = %e,
+                                "Failed to process MatchTick"
+                            );
+                        }
                     }
                 }
 
@@ -165,248 +177,6 @@ impl OrderBookWatcher {
         }
 
         info!("OrderBookWatcher shutdown complete");
-    }
-
-    /// Process a MatchTick event.
-    async fn process_match_tick(&self, tick: &MatchTick) -> Result<(), MatchError> {
-        match tick.blockchain {
-            BlockchainTarget::Erc20(chain) => self.match_erc20_transfers(chain, tick.token).await,
-            BlockchainTarget::Trc20 => self.match_trc20_transfers(tick.token).await,
-        }
-    }
-
-    /// Match ERC-20 transfers to pending deposits.
-    async fn match_erc20_transfers(
-        &self,
-        chain: EtherScanChain,
-        token: StablecoinName,
-    ) -> Result<(), MatchError> {
-        let processor = DatabaseProcessor {
-            pool: self.pool.clone(),
-        };
-
-        // Get pending deposits for this chain-token pair
-        let deposits: Vec<PendingDepositMatch> = processor
-            .process(GetErc20DepositsForMatching { chain, token })
-            .await?
-            .into_iter()
-            .map(PendingDepositMatch::from)
-            .collect();
-
-        if deposits.is_empty() {
-            debug!(
-                chain = ?chain,
-                token = ?token,
-                "No pending ERC-20 deposits to match"
-            );
-            return Ok(());
-        }
-
-        // Get unmatched transfers for this chain-token pair
-        let transfers: Vec<UnmatchedTransfer> = processor
-            .process(GetErc20TokenTransfersUnmatched { chain, token })
-            .await?
-            .into_iter()
-            .map(UnmatchedTransfer::from)
-            .collect();
-
-        if transfers.is_empty() {
-            debug!(
-                chain = ?chain,
-                token = ?token,
-                "No unmatched ERC-20 transfers"
-            );
-            return Ok(());
-        }
-
-        info!(
-            chain = ?chain,
-            token = ?token,
-            deposits = deposits.len(),
-            transfers = transfers.len(),
-            "Attempting to match ERC-20 transfers"
-        );
-        let (matches, _, _) = Self::compute_matches(transfers, deposits);
-
-        if !matches.is_empty() {
-            let (transfer_ids, deposit_ids, order_ids): (Vec<_>, Vec<_>, Vec<_>) = matches
-                .into_iter()
-                .inspect(|m| {
-                    info!(
-                        chain = ?chain,
-                        token = ?token,
-                        transfer_id = m.transfer_id,
-                        deposit_id = m.deposit_id,
-                        order_id = %m.order_id,
-                        "Matched ERC-20 transfer to deposit"
-                    );
-                })
-                .map(|m| (m.transfer_id, m.deposit_id, m.order_id))
-                .multiunzip();
-
-            // Execute all matches in a single transaction — O(1) DB operations
-            // Exactly 4 SQL statements regardless of the number of matches.
-            processor
-                .process(HandleErc20MatchedTrans {
-                    transfer_ids,
-                    deposit_ids,
-                    order_ids: order_ids.clone(),
-                })
-                .await?;
-
-            for order_id in order_ids {
-                let event = WebhookEvent::OrderStatusChanged {
-                    order_id,
-                    new_status: OrderStatus::Paid,
-                };
-                if let Err(e) = self.webhook_tx.send(event).await {
-                    error!(
-                        order_id = %order_id,
-                        error = %e,
-                        "Failed to send WebhookEvent"
-                    );
-                }
-            }
-        }
-
-        // Check for unknown transfers (transfers older than 1 hour with no matched deposit)
-        let old_transfers = processor
-            .process(GetOldUnmatchedErc20TransferIds { chain, token })
-            .await?;
-
-        if !old_transfers.is_empty() {
-            processor
-                .process(MarkErc20TransfersNoMatchedDeposit {
-                    transfer_ids: old_transfers.clone(),
-                })
-                .await?;
-
-            for transfer_id in old_transfers {
-                let event = WebhookEvent::UnknownTransferReceived {
-                    transfer_id,
-                    blockchain: BlockchainTarget::Erc20(chain),
-                };
-                if let Err(e) = self.webhook_tx.send(event).await {
-                    warn!(
-                        transfer_id = transfer_id,
-                        error = %e,
-                        "Failed to send unknown transfer WebhookEvent"
-                    );
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Match TRC-20 transfers to pending deposits.
-    async fn match_trc20_transfers(&self, token: StablecoinName) -> Result<(), MatchError> {
-        let processor = DatabaseProcessor {
-            pool: self.pool.clone(),
-        };
-
-        // Get pending deposits for this token
-        let deposits: Vec<PendingDepositMatch> = processor
-            .process(GetTrc20DepositsForMatching { token })
-            .await?
-            .into_iter()
-            .map(PendingDepositMatch::from)
-            .collect();
-
-        if deposits.is_empty() {
-            debug!(token = ?token, "No pending TRC-20 deposits to match");
-            return Ok(());
-        }
-
-        // Get unmatched transfers for this token
-        let transfers: Vec<UnmatchedTransfer> = processor
-            .process(GetTrc20TokenTransfersUnmatched { token })
-            .await?
-            .into_iter()
-            .map(UnmatchedTransfer::from)
-            .collect();
-
-        if transfers.is_empty() {
-            debug!(token = ?token, "No unmatched TRC-20 transfers");
-            return Ok(());
-        }
-
-        debug!(
-            token = ?token,
-            deposits = deposits.len(),
-            transfers = transfers.len(),
-            "Attempting to match TRC-20 transfers"
-        );
-        let (matches, _, _) = Self::compute_matches(transfers, deposits);
-
-        if !matches.is_empty() {
-            let (transfer_ids, deposit_ids, order_ids): (Vec<_>, Vec<_>, Vec<_>) = matches
-                .into_iter()
-                .inspect(|m| {
-                    info!(
-                        token = ?token,
-                        transfer_id = m.transfer_id,
-                        deposit_id = m.deposit_id,
-                        order_id = %m.order_id,
-                        "Matched TRC-20 transfer to deposit"
-                    );
-                })
-                .map(|m| (m.transfer_id, m.deposit_id, m.order_id))
-                .multiunzip();
-
-            // Execute all matches in a single transaction — O(1) DB operations
-            // Exactly 4 SQL statements regardless of the number of matches.
-            processor
-                .process(HandleTrc20MatchedTrans {
-                    transfer_ids,
-                    deposit_ids,
-                    order_ids: order_ids.clone(),
-                })
-                .await?;
-
-            for order_id in order_ids {
-                let event = WebhookEvent::OrderStatusChanged {
-                    order_id,
-                    new_status: OrderStatus::Paid,
-                };
-                if let Err(e) = self.webhook_tx.send(event).await {
-                    error!(
-                        order_id = %order_id,
-                        error = %e,
-                        "Failed to send WebhookEvent"
-                    );
-                }
-            }
-        }
-
-        // Check for unknown transfers (transfers older than 1 hour with no matched deposit)
-        let old_transfers = processor
-            .process(GetOldUnmatchedTrc20TransferIds { token })
-            .await?;
-
-        if !old_transfers.is_empty() {
-            processor
-                .process(MarkTrc20TransfersNoMatchedDeposit {
-                    transfer_ids: old_transfers.clone(),
-                })
-                .await?;
-
-            for transfer_id in old_transfers {
-                let event = WebhookEvent::UnknownTransferReceived {
-                    transfer_id,
-                    blockchain: BlockchainTarget::Trc20,
-                };
-                if let Err(e) = self.webhook_tx.send(event).await {
-                    warn!(
-                        transfer_id = transfer_id,
-                        error = %e,
-                        "Failed to send unknown transfer WebhookEvent"
-                    );
-                }
-            }
-        }
-
-        Ok(())
     }
 
     /// Compute all matches between transfers and deposits in memory.
@@ -447,7 +217,7 @@ impl OrderBookWatcher {
 
         let results: Vec<_> = sorted_transfers
             .into_iter()
-            .merge_join_by(sorted_deposits.into_iter(), |(k1, _), (k2, _)| k1.cmp(k2))
+            .merge_join_by(sorted_deposits, |(k1, _), (k2, _)| k1.cmp(k2))
             .map(|eob| match eob {
                 EitherOrBoth::Left((_, t)) => EitherOrBoth::Left(t),
                 EitherOrBoth::Right((_, d)) => EitherOrBoth::Right(d),
@@ -471,5 +241,249 @@ impl OrderBookWatcher {
             }
         }
         (matched, left_only, right_only)
+    }
+}
+
+#[derive(Debug, Clone)]
+/// Match ERC-20 transfers to pending deposits.
+pub struct Erc20Matching {
+    chain: EtherScanChain,
+    token: StablecoinName,
+}
+
+impl Processor<Erc20Matching> for OrderBookWatcher {
+    type Output = Vec<WebhookEvent>;
+    type Error = MatchError;
+
+    async fn process(&self, cmd: Erc20Matching) -> Result<Vec<WebhookEvent>, MatchError> {
+        let Erc20Matching { chain, token } = cmd;
+        // Get pending deposits for this chain-token pair
+        let deposits: Vec<PendingDepositMatch> = self
+            .processor
+            .process(GetErc20DepositsForMatching { chain, token })
+            .await?
+            .into_iter()
+            .map(PendingDepositMatch::from)
+            .collect();
+
+        if deposits.is_empty() {
+            debug!(
+                chain = ?chain,
+                token = ?token,
+                "No pending ERC-20 deposits to match"
+            );
+            return Ok(Vec::new());
+        }
+
+        // Get unmatched transfers for this chain-token pair
+        let transfers: Vec<UnmatchedTransfer> = self
+            .processor
+            .process(GetErc20TokenTransfersUnmatched { chain, token })
+            .await?
+            .into_iter()
+            .map(UnmatchedTransfer::from)
+            .collect();
+
+        if transfers.is_empty() {
+            debug!(
+                chain = ?chain,
+                token = ?token,
+                "No unmatched ERC-20 transfers"
+            );
+            return Ok(Vec::new());
+        }
+
+        info!(
+            chain = ?chain,
+            token = ?token,
+            deposits = deposits.len(),
+            transfers = transfers.len(),
+            "Attempting to match ERC-20 transfers"
+        );
+        let (matches, _, _) = Self::compute_matches(transfers, deposits);
+
+        // Check for unknown transfers (transfers older than 1 hour with no matched deposit)
+        let old_transfers = self
+            .processor
+            .process(GetOldUnmatchedErc20TransferIds { chain, token })
+            .await?;
+
+        let mut events = Vec::new();
+
+        if !old_transfers.is_empty() {
+            self.processor
+                .process(MarkErc20TransfersNoMatchedDeposit {
+                    transfer_ids: old_transfers.clone(),
+                })
+                .await?;
+
+            let mapped = old_transfers.into_iter().map(|transfer_id| {
+                WebhookEvent::UnknownTransferReceived {
+                    transfer_id,
+                    blockchain: BlockchainTarget::Erc20(chain),
+                }
+            });
+            events.extend(mapped);
+        }
+
+        if !matches.is_empty() {
+            let (transfer_ids, deposit_ids, order_ids): (Vec<_>, Vec<_>, Vec<_>) = matches
+                .into_iter()
+                .inspect(|m| {
+                    info!(
+                        chain = ?chain,
+                        token = ?token,
+                        transfer_id = m.transfer_id,
+                        deposit_id = m.deposit_id,
+                        order_id = %m.order_id,
+                        "Matched ERC-20 transfer to deposit"
+                    );
+                })
+                .map(|m| (m.transfer_id, m.deposit_id, m.order_id))
+                .multiunzip();
+
+            // Execute all matches in a single transaction — O(1) DB operations
+            // Exactly 4 SQL statements regardless of the number of matches.
+            self.processor
+                .process(HandleErc20MatchedTrans {
+                    transfer_ids,
+                    deposit_ids,
+                    order_ids: order_ids.clone(),
+                })
+                .await?;
+            let mapped = order_ids
+                .into_iter()
+                .map(|order_id| WebhookEvent::OrderStatusChanged {
+                    order_id,
+                    new_status: OrderStatus::Paid,
+                });
+            events.extend(mapped);
+        }
+        Ok(events)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Trc20Matching {
+    token: StablecoinName,
+}
+
+impl Processor<Trc20Matching> for OrderBookWatcher {
+    type Output = Vec<WebhookEvent>;
+    type Error = MatchError;
+    #[tracing::instrument(skip_all, err, name = "OrderBookWatcher:Trc20Matching")]
+    async fn process(&self, cmd: Trc20Matching) -> Result<Vec<WebhookEvent>, MatchError> {
+        let Trc20Matching { token } = cmd;
+
+        // Get pending deposits for this token
+        let deposits: Vec<PendingDepositMatch> = self
+            .processor
+            .process(GetTrc20DepositsForMatching { token })
+            .await?
+            .into_iter()
+            .map(PendingDepositMatch::from)
+            .collect();
+
+        if deposits.is_empty() {
+            debug!(token = ?token, "No pending TRC-20 deposits to match");
+            return Ok(Vec::new());
+        }
+
+        // Get unmatched transfers for this token
+        let transfers: Vec<UnmatchedTransfer> = self
+            .processor
+            .process(GetTrc20TokenTransfersUnmatched { token })
+            .await?
+            .into_iter()
+            .map(UnmatchedTransfer::from)
+            .collect();
+
+        if transfers.is_empty() {
+            debug!(token = ?token, "No unmatched TRC-20 transfers");
+            return Ok(Vec::new());
+        }
+
+        debug!(
+            token = ?token,
+            deposits = deposits.len(),
+            transfers = transfers.len(),
+            "Attempting to match TRC-20 transfers"
+        );
+        let (matches, _, _) = Self::compute_matches(transfers, deposits);
+
+        // Check for unknown transfers (transfers older than 1 hour with no matched deposit)
+        let old_transfers = self
+            .processor
+            .process(GetOldUnmatchedTrc20TransferIds { token })
+            .await?;
+
+        let mut events = Vec::new();
+        if !old_transfers.is_empty() {
+            self.processor
+                .process(MarkTrc20TransfersNoMatchedDeposit {
+                    transfer_ids: old_transfers.clone(),
+                })
+                .await?;
+            let mapped = old_transfers.into_iter().map(|transfer_id| {
+                WebhookEvent::UnknownTransferReceived {
+                    transfer_id,
+                    blockchain: BlockchainTarget::Trc20,
+                }
+            });
+            events.extend(mapped);
+        }
+
+        if !matches.is_empty() {
+            let (transfer_ids, deposit_ids, order_ids): (Vec<_>, Vec<_>, Vec<_>) = matches
+                .into_iter()
+                .inspect(|m| {
+                    info!(
+                        token = ?token,
+                        transfer_id = m.transfer_id,
+                        deposit_id = m.deposit_id,
+                        order_id = %m.order_id,
+                        "Matched TRC-20 transfer to deposit"
+                    );
+                })
+                .map(|m| (m.transfer_id, m.deposit_id, m.order_id))
+                .multiunzip();
+
+            // Execute all matches in a single transaction — O(1) DB operations
+            // Exactly 4 SQL statements regardless of the number of matches.
+            self.processor
+                .process(HandleTrc20MatchedTrans {
+                    transfer_ids,
+                    deposit_ids,
+                    order_ids: order_ids.clone(),
+                })
+                .await?;
+
+            let mapped = order_ids
+                .into_iter()
+                .map(|order_id| WebhookEvent::OrderStatusChanged {
+                    order_id,
+                    new_status: OrderStatus::Paid,
+                });
+            events.extend(mapped);
+        }
+        Ok(events)
+    }
+}
+
+impl Processor<MatchTick> for OrderBookWatcher {
+    type Output = Vec<WebhookEvent>;
+    type Error = MatchError;
+    #[tracing::instrument(skip_all, err, name = "OrderBookWatcher:MatchTick")]
+    async fn process(&self, tick: MatchTick) -> Result<Vec<WebhookEvent>, MatchError> {
+        match tick.blockchain {
+            BlockchainTarget::Erc20(chain) => {
+                self.process(Erc20Matching {
+                    chain,
+                    token: tick.token,
+                })
+                .await
+            }
+            BlockchainTarget::Trc20 => self.process(Trc20Matching { token: tick.token }).await,
+        }
     }
 }
