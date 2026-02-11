@@ -187,8 +187,18 @@ impl OrderBookWatcher {
         chain: EtherScanChain,
         token: StablecoinName,
     ) -> Result<(), MatchError> {
+        let processor = DatabaseProcessor {
+            pool: self.pool.clone(),
+        };
+
         // Get pending deposits for this chain-token pair
-        let deposits = self.get_erc20_pending_deposits(chain, token).await?;
+        let deposits: Vec<PendingDepositMatch> = processor
+            .process(GetErc20DepositsForMatching { chain, token })
+            .await?
+            .into_iter()
+            .map(PendingDepositMatch::from)
+            .collect();
+
         if deposits.is_empty() {
             debug!(
                 chain = ?chain,
@@ -199,7 +209,13 @@ impl OrderBookWatcher {
         }
 
         // Get unmatched transfers for this chain-token pair
-        let transfers = self.get_unmatched_erc20_transfers(chain, token).await?;
+        let transfers: Vec<UnmatchedTransfer> = processor
+            .process(GetErc20TokenTransfersUnmatched { chain, token })
+            .await?
+            .into_iter()
+            .map(UnmatchedTransfer::from)
+            .collect();
+
         if transfers.is_empty() {
             debug!(
                 chain = ?chain,
@@ -218,70 +234,96 @@ impl OrderBookWatcher {
         );
         let (matches, _, _) = Self::compute_matches(transfers, deposits);
 
-        if matches.is_empty() {
-            self.check_erc20_unknown_transfers(chain, token).await?;
-            return Ok(());
-        }
+        if !matches.is_empty() {
+            let (transfer_ids, deposit_ids, order_ids): (Vec<_>, Vec<_>, Vec<_>) = matches
+                .into_iter()
+                .inspect(|m| {
+                    info!(
+                        chain = ?chain,
+                        token = ?token,
+                        transfer_id = m.transfer_id,
+                        deposit_id = m.deposit_id,
+                        order_id = %m.order_id,
+                        "Matched ERC-20 transfer to deposit"
+                    );
+                })
+                .map(|m| (m.transfer_id, m.deposit_id, m.order_id))
+                .multiunzip();
 
-        let (transfer_ids, deposit_ids, order_ids): (Vec<_>, Vec<_>, Vec<_>) = matches
-            .into_iter()
-            .inspect(|m| {
-                info!(
-                    chain = ?chain,
-                    token = ?token,
-                    transfer_id = m.transfer_id,
-                    deposit_id = m.deposit_id,
-                    order_id = %m.order_id,
-                    "Matched ERC-20 transfer to deposit"
-                );
-            })
-            .map(|m| (m.transfer_id, m.deposit_id, m.order_id))
-            .multiunzip();
+            // Execute all matches in a single transaction — O(1) DB operations
+            // Exactly 4 SQL statements regardless of the number of matches.
+            let mut tx = self.pool.begin().await?;
 
-        // Execute all matches in a single transaction — O(1) DB operations
-        // Exactly 4 SQL statements regardless of the number of matches.
-        let mut tx = self.pool.begin().await?;
-
-        // 1. Batch mark transfers as matched
-        Erc20TokenTransfer::mark_matched_many_tx(&mut tx, &transfer_ids, &deposit_ids).await?;
-
-        // 2. Batch update order statuses to Paid
-        OrderRecord::update_status_many_tx(&mut tx, &order_ids, OrderStatus::Paid).await?;
-
-        // 3. Batch delete ERC-20 pending deposits (keep matched ones)
-        Erc20PendingDeposit::delete_for_orders_except_many_tx(&mut tx, &order_ids, &deposit_ids)
+            Erc20TokenTransfer::mark_matched_many_tx(&mut tx, &transfer_ids, &deposit_ids).await?;
+            OrderRecord::update_status_many_tx(&mut tx, &order_ids, OrderStatus::Paid).await?;
+            Erc20PendingDeposit::delete_for_orders_except_many_tx(
+                &mut tx,
+                &order_ids,
+                &deposit_ids,
+            )
             .await?;
+            Trc20PendingDeposit::delete_for_orders_many_tx(&mut tx, &order_ids).await?;
 
-        // 4. Batch delete TRC-20 pending deposits for matched orders
-        Trc20PendingDeposit::delete_for_orders_many_tx(&mut tx, &order_ids).await?;
+            tx.commit().await?;
 
-        tx.commit().await?;
-
-        // Emit webhook events after successful commit
-        for order_id in order_ids {
-            let event = WebhookEvent::OrderStatusChanged {
-                order_id,
-                new_status: OrderStatus::Paid,
-            };
-            if let Err(e) = self.webhook_tx.send(event).await {
-                error!(
-                    order_id = %order_id,
-                    error = %e,
-                    "Failed to send WebhookEvent"
-                );
+            for order_id in order_ids {
+                let event = WebhookEvent::OrderStatusChanged {
+                    order_id,
+                    new_status: OrderStatus::Paid,
+                };
+                if let Err(e) = self.webhook_tx.send(event).await {
+                    error!(
+                        order_id = %order_id,
+                        error = %e,
+                        "Failed to send WebhookEvent"
+                    );
+                }
             }
         }
 
-        // Check for unknown transfers (transfers that don't match any deposit)
-        self.check_erc20_unknown_transfers(chain, token).await?;
+        // Check for unknown transfers (transfers older than 1 hour with no matched deposit)
+        let old_transfers = processor
+            .process(GetOldUnmatchedErc20TransferIds { chain, token })
+            .await?;
+
+        if !old_transfers.is_empty() {
+            processor
+                .process(MarkErc20TransfersNoMatchedDeposit {
+                    transfer_ids: old_transfers.clone(),
+                })
+                .await?;
+
+            for transfer_id in old_transfers {
+                let event = WebhookEvent::UnknownTransferReceived {
+                    transfer_id,
+                    blockchain: BlockchainTarget::Erc20(chain),
+                };
+                if let Err(e) = self.webhook_tx.send(event).await {
+                    warn!(
+                        transfer_id = transfer_id,
+                        error = %e,
+                        "Failed to send unknown transfer WebhookEvent"
+                    );
+                }
+            }
+        }
 
         Ok(())
     }
 
     /// Match TRC-20 transfers to pending deposits.
     async fn match_trc20_transfers(&self, token: StablecoinName) -> Result<(), MatchError> {
+        let processor = DatabaseProcessor {
+            pool: self.pool.clone(),
+        };
+
         // Get pending deposits for this token
-        let deposits = self.get_trc20_pending_deposits(token).await?;
+        let deposits: Vec<PendingDepositMatch> = processor
+            .process(GetTrc20DepositsForMatching { token })
+            .await?
+            .into_iter()
+            .map(PendingDepositMatch::from)
+            .collect();
 
         if deposits.is_empty() {
             debug!(token = ?token, "No pending TRC-20 deposits to match");
@@ -289,7 +331,12 @@ impl OrderBookWatcher {
         }
 
         // Get unmatched transfers for this token
-        let transfers = self.get_unmatched_trc20_transfers(token).await?;
+        let transfers: Vec<UnmatchedTransfer> = processor
+            .process(GetTrc20TokenTransfersUnmatched { token })
+            .await?
+            .into_iter()
+            .map(UnmatchedTransfer::from)
+            .collect();
 
         if transfers.is_empty() {
             debug!(token = ?token, "No unmatched TRC-20 transfers");
@@ -302,65 +349,80 @@ impl OrderBookWatcher {
             transfers = transfers.len(),
             "Attempting to match TRC-20 transfers"
         );
-
         let (matches, _, _) = Self::compute_matches(transfers, deposits);
 
-        if matches.is_empty() {
-            self.check_trc20_unknown_transfers(token).await?;
-            return Ok(());
-        }
+        if !matches.is_empty() {
+            let (transfer_ids, deposit_ids, order_ids): (Vec<_>, Vec<_>, Vec<_>) = matches
+                .into_iter()
+                .inspect(|m| {
+                    info!(
+                        token = ?token,
+                        transfer_id = m.transfer_id,
+                        deposit_id = m.deposit_id,
+                        order_id = %m.order_id,
+                        "Matched TRC-20 transfer to deposit"
+                    );
+                })
+                .map(|m| (m.transfer_id, m.deposit_id, m.order_id))
+                .multiunzip();
 
-        let (transfer_ids, deposit_ids, order_ids): (Vec<_>, Vec<_>, Vec<_>) = matches
-            .into_iter()
-            .inspect(|m| {
-                info!(
-                    token = ?token,
-                    transfer_id = m.transfer_id,
-                    deposit_id = m.deposit_id,
-                    order_id = %m.order_id,
-                    "Matched TRC-20 transfer to deposit"
-                );
-            })
-            .map(|m| (m.transfer_id, m.deposit_id, m.order_id))
-            .multiunzip();
+            // Execute all matches in a single transaction — O(1) DB operations
+            // Exactly 4 SQL statements regardless of the number of matches.
+            let mut tx = self.pool.begin().await?;
 
-        // Execute all matches in a single transaction — O(1) DB operations
-        // Exactly 4 SQL statements regardless of the number of matches.
-        let mut tx = self.pool.begin().await?;
-
-        // 1. Batch mark transfers as matched
-        Trc20TokenTransfer::mark_matched_many_tx(&mut tx, &transfer_ids, &deposit_ids).await?;
-
-        // 2. Batch update order statuses to Paid
-        OrderRecord::update_status_many_tx(&mut tx, &order_ids, OrderStatus::Paid).await?;
-
-        // 3. Batch delete TRC-20 pending deposits (keep matched ones)
-        Trc20PendingDeposit::delete_for_orders_except_many_tx(&mut tx, &order_ids, &deposit_ids)
+            Trc20TokenTransfer::mark_matched_many_tx(&mut tx, &transfer_ids, &deposit_ids).await?;
+            OrderRecord::update_status_many_tx(&mut tx, &order_ids, OrderStatus::Paid).await?;
+            Trc20PendingDeposit::delete_for_orders_except_many_tx(
+                &mut tx,
+                &order_ids,
+                &deposit_ids,
+            )
             .await?;
+            Erc20PendingDeposit::delete_for_orders_many_tx(&mut tx, &order_ids).await?;
 
-        // 4. Batch delete ERC-20 pending deposits for matched orders
-        Erc20PendingDeposit::delete_for_orders_many_tx(&mut tx, &order_ids).await?;
+            tx.commit().await?;
 
-        tx.commit().await?;
-
-        // Emit webhook events after successful commit
-        for order_id in order_ids {
-            let event = WebhookEvent::OrderStatusChanged {
-                order_id,
-                new_status: OrderStatus::Paid,
-            };
-
-            if let Err(e) = self.webhook_tx.send(event).await {
-                error!(
-                    order_id = %order_id,
-                    error = %e,
-                    "Failed to send WebhookEvent"
-                );
+            for order_id in order_ids {
+                let event = WebhookEvent::OrderStatusChanged {
+                    order_id,
+                    new_status: OrderStatus::Paid,
+                };
+                if let Err(e) = self.webhook_tx.send(event).await {
+                    error!(
+                        order_id = %order_id,
+                        error = %e,
+                        "Failed to send WebhookEvent"
+                    );
+                }
             }
         }
 
-        // Check for unknown transfers
-        self.check_trc20_unknown_transfers(token).await?;
+        // Check for unknown transfers (transfers older than 1 hour with no matched deposit)
+        let old_transfers = processor
+            .process(GetOldUnmatchedTrc20TransferIds { token })
+            .await?;
+
+        if !old_transfers.is_empty() {
+            processor
+                .process(MarkTrc20TransfersNoMatchedDeposit {
+                    transfer_ids: old_transfers.clone(),
+                })
+                .await?;
+
+            for transfer_id in old_transfers {
+                let event = WebhookEvent::UnknownTransferReceived {
+                    transfer_id,
+                    blockchain: BlockchainTarget::Trc20,
+                };
+                if let Err(e) = self.webhook_tx.send(event).await {
+                    warn!(
+                        transfer_id = transfer_id,
+                        error = %e,
+                        "Failed to send unknown transfer WebhookEvent"
+                    );
+                }
+            }
+        }
 
         Ok(())
     }
@@ -427,161 +489,5 @@ impl OrderBookWatcher {
             }
         }
         (matched, left_only, right_only)
-    }
-
-    /// Get pending ERC-20 deposits for matching.
-    async fn get_erc20_pending_deposits(
-        &self,
-        chain: EtherScanChain,
-        token: StablecoinName,
-    ) -> Result<Vec<PendingDepositMatch>, MatchError> {
-        let processor = DatabaseProcessor {
-            pool: self.pool.clone(),
-        };
-        let query = GetErc20DepositsForMatching { chain, token };
-        let deposits = processor
-            .process(query)
-            .await?
-            .into_iter()
-            .map(PendingDepositMatch::from)
-            .collect();
-        Ok(deposits)
-    }
-
-    /// Get pending TRC-20 deposits for matching.
-    async fn get_trc20_pending_deposits(
-        &self,
-        token: StablecoinName,
-    ) -> Result<Vec<PendingDepositMatch>, MatchError> {
-        let processor = DatabaseProcessor {
-            pool: self.pool.clone(),
-        };
-        let deposits = processor
-            .process(GetTrc20DepositsForMatching { token })
-            .await?
-            .into_iter()
-            .map(PendingDepositMatch::from)
-            .collect();
-        Ok(deposits)
-    }
-
-    /// Get unmatched ERC-20 transfers.
-    async fn get_unmatched_erc20_transfers(
-        &self,
-        chain: EtherScanChain,
-        token: StablecoinName,
-    ) -> Result<Vec<UnmatchedTransfer>, MatchError> {
-        let processor = DatabaseProcessor {
-            pool: self.pool.clone(),
-        };
-        let transfers = processor
-            .process(GetErc20TokenTransfersUnmatched { chain, token })
-            .await?
-            .into_iter()
-            .map(UnmatchedTransfer::from)
-            .collect();
-        Ok(transfers)
-    }
-
-    /// Get unmatched TRC-20 transfers.
-    async fn get_unmatched_trc20_transfers(
-        &self,
-        token: StablecoinName,
-    ) -> Result<Vec<UnmatchedTransfer>, MatchError> {
-        let processor = DatabaseProcessor {
-            pool: self.pool.clone(),
-        };
-        let transfers = processor
-            .process(GetTrc20TokenTransfersUnmatched { token })
-            .await?
-            .into_iter()
-            .map(UnmatchedTransfer::from)
-            .collect();
-        Ok(transfers)
-    }
-
-    /// Check for unknown ERC-20 transfers and emit webhook events.
-    async fn check_erc20_unknown_transfers(
-        &self,
-        chain: EtherScanChain,
-        token: StablecoinName,
-    ) -> Result<(), MatchError> {
-        // Find transfers that have been waiting too long and mark as no_matched_deposit
-        // These are transfers older than 1 hour that haven't been matched
-        let processor = DatabaseProcessor {
-            pool: self.pool.clone(),
-        };
-        let old_transfers = processor
-            .process(GetOldUnmatchedErc20TransferIds { chain, token })
-            .await?;
-
-        if old_transfers.is_empty() {
-            return Ok(());
-        }
-
-        // Batch update all transfers at once
-        processor
-            .process(MarkErc20TransfersNoMatchedDeposit {
-                transfer_ids: old_transfers.clone(),
-            })
-            .await?;
-
-        // Emit webhook events for each unknown transfer
-        for transfer_id in old_transfers {
-            let event = WebhookEvent::UnknownTransferReceived {
-                transfer_id,
-                blockchain: BlockchainTarget::Erc20(chain),
-            };
-
-            if let Err(e) = self.webhook_tx.send(event).await {
-                warn!(
-                    transfer_id = transfer_id,
-                    error = %e,
-                    "Failed to send unknown transfer WebhookEvent"
-                );
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Check for unknown TRC-20 transfers and emit webhook events.
-    async fn check_trc20_unknown_transfers(&self, token: StablecoinName) -> Result<(), MatchError> {
-        // Find transfers that have been waiting too long and mark as no_matched_deposit
-        let processor = DatabaseProcessor {
-            pool: self.pool.clone(),
-        };
-        let old_transfers = processor
-            .process(GetOldUnmatchedTrc20TransferIds { token })
-            .await?;
-
-        if old_transfers.is_empty() {
-            return Ok(());
-        }
-
-        // Batch update all transfers at once
-        processor
-            .process(MarkTrc20TransfersNoMatchedDeposit {
-                transfer_ids: old_transfers.clone(),
-            })
-            .await?;
-
-        // Emit webhook events for each unknown transfer
-        for transfer_id in old_transfers {
-            let event = WebhookEvent::UnknownTransferReceived {
-                transfer_id,
-                blockchain: BlockchainTarget::Trc20,
-            };
-
-            if let Err(e) = self.webhook_tx.send(event).await {
-                warn!(
-                    transfer_id = transfer_id,
-                    error = %e,
-                    "Failed to send unknown transfer WebhookEvent"
-                );
-            }
-        }
-
-        Ok(())
     }
 }
