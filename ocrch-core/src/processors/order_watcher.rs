@@ -10,15 +10,15 @@
 
 use crate::entities::StablecoinName;
 use crate::entities::erc20_pending_deposit::{
-    Erc20PendingDeposit, Erc20PendingDepositMatch, EtherScanChain, GetErc20DepositsForMatching,
+    Erc20PendingDepositMatch, EtherScanChain, GetErc20DepositsForMatching,
 };
 use crate::entities::erc20_transfer::{
-    Erc20TokenTransfer, Erc20UnmatchedTransfer, GetErc20TokenTransfersUnmatched,
-    GetOldUnmatchedErc20TransferIds, MarkErc20TransfersNoMatchedDeposit,
+    Erc20UnmatchedTransfer, GetErc20TokenTransfersUnmatched, GetOldUnmatchedErc20TransferIds,
+    HandleErc20MatchedTrans, MarkErc20TransfersNoMatchedDeposit,
 };
-use crate::entities::order_records::{OrderRecord, OrderStatus};
+use crate::entities::order_records::OrderStatus;
 use crate::entities::trc20_pending_deposit::{
-    GetTrc20DepositsForMatching, Trc20PendingDeposit, Trc20PendingDepositMatch,
+    GetTrc20DepositsForMatching, Trc20PendingDepositMatch,
 };
 use crate::entities::trc20_transfer::{
     GetOldUnmatchedTrc20TransferIds, GetTrc20TokenTransfersUnmatched, HandleTrc20MatchedTrans,
@@ -246,19 +246,13 @@ impl OrderBookWatcher {
 
             // Execute all matches in a single transaction — O(1) DB operations
             // Exactly 4 SQL statements regardless of the number of matches.
-            let mut tx = self.pool.begin().await?;
-
-            Erc20TokenTransfer::mark_matched_many_tx(&mut tx, &transfer_ids, &deposit_ids).await?;
-            OrderRecord::update_status_many_tx(&mut tx, &order_ids, OrderStatus::Paid).await?;
-            Erc20PendingDeposit::delete_for_orders_except_many_tx(
-                &mut tx,
-                &order_ids,
-                &deposit_ids,
-            )
-            .await?;
-            Trc20PendingDeposit::delete_for_orders_many_tx(&mut tx, &order_ids).await?;
-
-            tx.commit().await?;
+            processor
+                .process(HandleErc20MatchedTrans {
+                    transfer_ids,
+                    deposit_ids,
+                    order_ids: order_ids.clone(),
+                })
+                .await?;
 
             for order_id in order_ids {
                 let event = WebhookEvent::OrderStatusChanged {

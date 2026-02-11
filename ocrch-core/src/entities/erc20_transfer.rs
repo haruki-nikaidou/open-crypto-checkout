@@ -3,6 +3,7 @@ use crate::entities::{StablecoinName, TransferStatus};
 use crate::framework::DatabaseProcessor;
 use kanau::processor::Processor;
 use rust_decimal::Decimal;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Erc20TokenTransfer {
@@ -244,29 +245,78 @@ impl Processor<MarkErc20TransfersNoMatchedDeposit> for DatabaseProcessor {
     }
 }
 
-impl Erc20TokenTransfer {
-    /// Mark multiple transfers as matched with their fulfillment IDs in a single query.
-    pub async fn mark_matched_many_tx(
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        transfer_ids: &[i64],
-        fulfillment_ids: &[i64],
-    ) -> Result<u64, sqlx::Error> {
-        if transfer_ids.is_empty() {
-            return Ok(0);
-        }
+#[derive(Debug, Clone)]
+/// Handle matched ERC-20 transfers in a single transaction.
+///
+/// Executes 4 SQL statements atomically:
+/// 1. Mark ERC-20 transfers as matched with their deposit (fulfillment) IDs
+/// 2. Update order statuses to `Paid`
+/// 3. Delete ERC-20 pending deposits for matched orders (keep the matched deposit)
+/// 4. Delete TRC-20 pending deposits for matched orders (cross-chain cleanup)
+pub struct HandleErc20MatchedTrans {
+    pub transfer_ids: Vec<i64>,
+    pub deposit_ids: Vec<i64>,
+    pub order_ids: Vec<Uuid>,
+}
 
-        let result = sqlx::query(
+impl Processor<HandleErc20MatchedTrans> for DatabaseProcessor {
+    type Output = ();
+    type Error = sqlx::Error;
+    #[tracing::instrument(skip_all, err, name = "SQL-Transaction:HandleErc20MatchedTrans")]
+    async fn process(&self, cmd: HandleErc20MatchedTrans) -> Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+
+        // 1. Mark ERC-20 transfers as matched with their deposit (fulfillment) IDs
+        sqlx::query!(
             r#"
             UPDATE erc20_token_transfers AS t
             SET status = 'matched', fulfillment_id = u.fulfillment_id
             FROM UNNEST($1::bigint[], $2::bigint[]) AS u(id, fulfillment_id)
             WHERE t.id = u.id
             "#,
+            &cmd.transfer_ids,
+            &cmd.deposit_ids,
         )
-        .bind(transfer_ids)
-        .bind(fulfillment_ids)
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await?;
-        Ok(result.rows_affected())
+
+        // 2. Update order statuses to Paid
+        sqlx::query!(
+            r#"
+            UPDATE order_records
+            SET status = 'paid'
+            WHERE order_id = ANY($1)
+            "#,
+            &cmd.order_ids,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        // 3. Delete ERC-20 pending deposits for matched orders (keep the matched deposit)
+        sqlx::query!(
+            r#"
+            DELETE FROM erc20_pending_deposits AS d
+            USING UNNEST($1::uuid[], $2::bigint[]) AS u(order_id, except_id)
+            WHERE d."order" = u.order_id AND d.id != u.except_id
+            "#,
+            &cmd.order_ids,
+            &cmd.deposit_ids,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        // 4. Delete TRC-20 pending deposits for matched orders (cross-chain cleanup)
+        sqlx::query!(
+            r#"
+            DELETE FROM trc20_pending_deposits
+            WHERE "order" = ANY($1)
+            "#,
+            &cmd.order_ids,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
     }
 }
