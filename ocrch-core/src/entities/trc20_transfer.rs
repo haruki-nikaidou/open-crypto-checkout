@@ -1,6 +1,4 @@
-use crate::entities::erc20_pending_deposit::Erc20PendingDeposit;
-use crate::entities::order_records::{OrderRecord, OrderStatus};
-use crate::entities::trc20_pending_deposit::Trc20PendingDeposit;
+use crate::entities::order_records::OrderStatus;
 use crate::entities::{StablecoinName, TransferStatus};
 use crate::framework::DatabaseProcessor;
 use kanau::processor::Processor;
@@ -253,33 +251,6 @@ impl Trc20TokenTransfer {
         .await?;
         Ok(())
     }
-
-    /// Mark multiple transfers as matched with their fulfillment IDs in a single query.
-    ///
-    /// Uses `UNNEST` to batch-update all rows in one SQL statement.
-    pub async fn mark_matched_many_tx(
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        transfer_ids: &[i64],
-        fulfillment_ids: &[i64],
-    ) -> Result<u64, sqlx::Error> {
-        if transfer_ids.is_empty() {
-            return Ok(0);
-        }
-
-        let result = sqlx::query(
-            r#"
-            UPDATE trc20_token_transfers AS t
-            SET status = 'matched', fulfillment_id = u.fulfillment_id
-            FROM UNNEST($1::bigint[], $2::bigint[]) AS u(id, fulfillment_id)
-            WHERE t.id = u.id
-            "#,
-        )
-        .bind(transfer_ids)
-        .bind(fulfillment_ids)
-        .execute(&mut **tx)
-        .await?;
-        Ok(result.rows_affected())
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -303,16 +274,56 @@ impl Processor<HandleTrc20MatchedTrans> for DatabaseProcessor {
     async fn process(&self, cmd: HandleTrc20MatchedTrans) -> Result<(), sqlx::Error> {
         let mut tx = self.pool.begin().await?;
 
-        Trc20TokenTransfer::mark_matched_many_tx(&mut tx, &cmd.transfer_ids, &cmd.deposit_ids)
-            .await?;
-        OrderRecord::update_status_many_tx(&mut tx, &cmd.order_ids, OrderStatus::Paid).await?;
-        Trc20PendingDeposit::delete_for_orders_except_many_tx(
-            &mut tx,
+        // 1. Mark TRC-20 transfers as matched with their deposit (fulfillment) IDs
+        sqlx::query!(
+            r#"
+            UPDATE trc20_token_transfers AS t
+            SET status = 'matched', fulfillment_id = u.fulfillment_id
+            FROM UNNEST($1::bigint[], $2::bigint[]) AS u(id, fulfillment_id)
+            WHERE t.id = u.id
+            "#,
+            &cmd.transfer_ids,
+            &cmd.deposit_ids,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        // 2. Update order statuses to Paid
+        sqlx::query!(
+            r#"
+            UPDATE order_records
+            SET status = 'paid'
+            WHERE order_id = ANY($1)
+            "#,
+            &cmd.order_ids,
+        )
+        .bind(&cmd.order_ids)
+        .execute(&mut *tx)
+        .await?;
+
+        // 3. Delete TRC-20 pending deposits for matched orders (keep the matched deposit)
+        sqlx::query!(
+            r#"
+            DELETE FROM trc20_pending_deposits AS d
+            USING UNNEST($1::uuid[], $2::bigint[]) AS u(order_id, except_id)
+            WHERE d."order" = u.order_id AND d.id != u.except_id
+            "#,
             &cmd.order_ids,
             &cmd.deposit_ids,
         )
+        .execute(&mut *tx)
         .await?;
-        Erc20PendingDeposit::delete_for_orders_many_tx(&mut tx, &cmd.order_ids).await?;
+
+        // 4. Delete ERC-20 pending deposits for matched orders (cross-chain cleanup)
+        sqlx::query!(
+            r#"
+            DELETE FROM erc20_pending_deposits
+            WHERE "order" = ANY($1)
+            "#,
+            &cmd.order_ids,
+        )
+        .execute(&mut *tx)
+        .await?;
 
         tx.commit().await?;
         Ok(())
