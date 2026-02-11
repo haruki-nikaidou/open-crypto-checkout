@@ -53,7 +53,6 @@ struct PendingDepositMatch {
     order_id: Uuid,
     wallet_address: String,
     value: Decimal,
-    started_at_timestamp: i64,
 }
 
 impl From<Erc20PendingDepositMatch> for PendingDepositMatch {
@@ -63,7 +62,6 @@ impl From<Erc20PendingDepositMatch> for PendingDepositMatch {
             order_id: d.order_id,
             wallet_address: d.wallet_address,
             value: d.value,
-            started_at_timestamp: d.started_at_timestamp,
         }
     }
 }
@@ -75,7 +73,6 @@ impl From<Trc20PendingDepositMatch> for PendingDepositMatch {
             order_id: d.order_id,
             wallet_address: d.wallet_address,
             value: d.value,
-            started_at_timestamp: d.started_at_timestamp,
         }
     }
 }
@@ -86,7 +83,6 @@ struct UnmatchedTransfer {
     id: i64,
     to_address: String,
     value: Decimal,
-    block_timestamp: i64,
 }
 
 impl From<Erc20UnmatchedTransfer> for UnmatchedTransfer {
@@ -95,7 +91,6 @@ impl From<Erc20UnmatchedTransfer> for UnmatchedTransfer {
             id: t.id,
             to_address: t.to_address,
             value: t.value,
-            block_timestamp: t.block_timestamp,
         }
     }
 }
@@ -106,7 +101,6 @@ impl From<Trc20UnmatchedTransfer> for UnmatchedTransfer {
             id: t.id,
             to_address: t.to_address,
             value: t.value,
-            block_timestamp: t.block_timestamp,
         }
     }
 }
