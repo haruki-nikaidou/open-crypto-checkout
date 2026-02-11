@@ -21,8 +21,8 @@ use crate::entities::trc20_pending_deposit::{
     GetTrc20DepositsForMatching, Trc20PendingDeposit, Trc20PendingDepositMatch,
 };
 use crate::entities::trc20_transfer::{
-    GetOldUnmatchedTrc20TransferIds, GetTrc20TokenTransfersUnmatched,
-    MarkTrc20TransfersNoMatchedDeposit, Trc20TokenTransfer, Trc20UnmatchedTransfer,
+    GetOldUnmatchedTrc20TransferIds, GetTrc20TokenTransfersUnmatched, HandleTrc20MatchedTrans,
+    MarkTrc20TransfersNoMatchedDeposit, Trc20UnmatchedTransfer,
 };
 use crate::events::{
     BlockchainTarget, MatchTick, MatchTickReceiver, WebhookEvent, WebhookEventSender,
@@ -368,19 +368,13 @@ impl OrderBookWatcher {
 
             // Execute all matches in a single transaction — O(1) DB operations
             // Exactly 4 SQL statements regardless of the number of matches.
-            let mut tx = self.pool.begin().await?;
-
-            Trc20TokenTransfer::mark_matched_many_tx(&mut tx, &transfer_ids, &deposit_ids).await?;
-            OrderRecord::update_status_many_tx(&mut tx, &order_ids, OrderStatus::Paid).await?;
-            Trc20PendingDeposit::delete_for_orders_except_many_tx(
-                &mut tx,
-                &order_ids,
-                &deposit_ids,
-            )
-            .await?;
-            Erc20PendingDeposit::delete_for_orders_many_tx(&mut tx, &order_ids).await?;
-
-            tx.commit().await?;
+            processor
+                .process(HandleTrc20MatchedTrans {
+                    transfer_ids,
+                    deposit_ids,
+                    order_ids: order_ids.clone(),
+                })
+                .await?;
 
             for order_id in order_ids {
                 let event = WebhookEvent::OrderStatusChanged {

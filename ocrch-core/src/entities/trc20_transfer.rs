@@ -1,7 +1,11 @@
+use crate::entities::erc20_pending_deposit::Erc20PendingDeposit;
+use crate::entities::order_records::{OrderRecord, OrderStatus};
+use crate::entities::trc20_pending_deposit::Trc20PendingDeposit;
 use crate::entities::{StablecoinName, TransferStatus};
 use crate::framework::DatabaseProcessor;
 use kanau::processor::Processor;
 use rust_decimal::Decimal;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trc20TokenTransfer {
@@ -275,5 +279,42 @@ impl Trc20TokenTransfer {
         .execute(&mut **tx)
         .await?;
         Ok(result.rows_affected())
+    }
+}
+
+#[derive(Debug, Clone)]
+/// Handle matched TRC-20 transfers in a single transaction.
+///
+/// Executes 4 SQL statements atomically:
+/// 1. Mark TRC-20 transfers as matched with their deposit (fulfillment) IDs
+/// 2. Update order statuses to `Paid`
+/// 3. Delete TRC-20 pending deposits for matched orders (keep the matched deposit)
+/// 4. Delete ERC-20 pending deposits for matched orders (cross-chain cleanup)
+pub struct HandleTrc20MatchedTrans {
+    pub transfer_ids: Vec<i64>,
+    pub deposit_ids: Vec<i64>,
+    pub order_ids: Vec<Uuid>,
+}
+
+impl Processor<HandleTrc20MatchedTrans> for DatabaseProcessor {
+    type Output = ();
+    type Error = sqlx::Error;
+    #[tracing::instrument(skip_all, err, name = "SQL:HandleTrc20MatchedTrans")]
+    async fn process(&self, cmd: HandleTrc20MatchedTrans) -> Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+
+        Trc20TokenTransfer::mark_matched_many_tx(&mut tx, &cmd.transfer_ids, &cmd.deposit_ids)
+            .await?;
+        OrderRecord::update_status_many_tx(&mut tx, &cmd.order_ids, OrderStatus::Paid).await?;
+        Trc20PendingDeposit::delete_for_orders_except_many_tx(
+            &mut tx,
+            &cmd.order_ids,
+            &cmd.deposit_ids,
+        )
+        .await?;
+        Erc20PendingDeposit::delete_for_orders_many_tx(&mut tx, &cmd.order_ids).await?;
+
+        tx.commit().await?;
+        Ok(())
     }
 }
