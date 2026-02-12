@@ -225,6 +225,50 @@ impl Processor<UpdateOrderStatus> for DatabaseProcessor {
     }
 }
 
+/// Create a new order record.
+///
+/// Generates a new UUID for `order_id` and inserts the row with `status = 'pending'`.
+/// Returns the complete newly-created record.
+#[derive(Debug, Clone)]
+pub struct CreateOrderRecord {
+    pub merchant_order_id: String,
+    pub amount: rust_decimal::Decimal,
+    pub webhook_url: String,
+}
+
+impl Processor<CreateOrderRecord> for DatabaseProcessor {
+    type Output = OrderRecord;
+    type Error = sqlx::Error;
+    #[tracing::instrument(skip_all, err, name = "SQL:CreateOrderRecord")]
+    async fn process(&self, cmd: CreateOrderRecord) -> Result<OrderRecord, sqlx::Error> {
+        let order_id = Uuid::now_v7();
+        let order = sqlx::query_as!(
+            OrderRecord,
+            r#"
+            INSERT INTO order_records (order_id, merchant_order_id, amount, webhook_url)
+            VALUES ($1, $2, $3, $4)
+            RETURNING
+                order_id,
+                merchant_order_id,
+                amount,
+                created_at,
+                status as "status: OrderStatus",
+                webhook_success_at,
+                webhook_url,
+                webhook_retry_count,
+                webhook_last_tried_at
+            "#,
+            order_id,
+            cmd.merchant_order_id,
+            cmd.amount,
+            cmd.webhook_url,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(order)
+    }
+}
+
 impl OrderRecord {
     /// Update the status of an order within a transaction.
     pub async fn update_status_tx(

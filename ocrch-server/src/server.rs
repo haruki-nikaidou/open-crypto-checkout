@@ -1,5 +1,6 @@
 //! Axum server setup and router configuration.
 
+use crate::api;
 use crate::shutdown::shutdown_signal;
 use crate::state::AppState;
 use axum::{Json, Router, response::IntoResponse, routing::get};
@@ -12,6 +13,8 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         // Health check endpoint
         .route("/health", get(health_check))
+        // Service API (application backend)
+        .nest("/api/v1/service", api::service::router())
         // Add state to all routes
         .with_state(state)
 }

@@ -5,12 +5,14 @@
 //! by the server crate.
 
 mod admin;
+mod api_keys;
 mod config_store;
 mod merchant;
 mod server;
 mod wallet;
 
 pub use admin::AdminConfig;
+pub use api_keys::ApiKeysConfig;
 pub use config_store::{ConfigStore, ConfigWatcher};
 pub use merchant::MerchantConfig;
 pub use server::ServerConfig;
@@ -33,4 +35,6 @@ pub struct SharedConfig {
     pub merchant: Arc<RwLock<MerchantConfig>>,
     /// Wallet configurations for receiving payments.
     pub wallets: Arc<RwLock<Vec<WalletConfig>>>,
+    /// API keys for blockchain explorer services.
+    pub api_keys: Arc<RwLock<ApiKeysConfig>>,
 }

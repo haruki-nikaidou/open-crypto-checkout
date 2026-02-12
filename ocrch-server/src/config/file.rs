@@ -12,8 +12,18 @@ pub struct FileConfig {
     pub server: ServerConfig,
     pub admin: AdminConfig,
     pub merchant: MerchantConfig,
+    pub api_keys: ApiKeysFileConfig,
     #[serde(default)]
     pub wallets: Vec<WalletConfig>,
+}
+
+/// API keys configuration section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeysFileConfig {
+    /// EtherScan API key (used for all EVM-compatible chains).
+    pub etherscan_api_key: String,
+    /// TronScan API key (used for the Tron network).
+    pub tronscan_api_key: String,
 }
 
 /// Server configuration section.
@@ -89,6 +99,10 @@ name = "Test Store"
 secret = "secret123"
 allowed_origins = ["https://checkout.example.com"]
 
+[api_keys]
+etherscan_api_key = "test-etherscan-key"
+tronscan_api_key = "test-tronscan-key"
+
 [[wallets]]
 blockchain = "eth"
 address = "0x1234567890abcdef"
@@ -114,6 +128,10 @@ enabled_coins = ["USDT", "USDC"]
                 name: "Test Store".to_string(),
                 secret: "secret123".to_string(),
                 allowed_origins: vec![],
+            },
+            api_keys: ApiKeysFileConfig {
+                etherscan_api_key: "test-key".to_string(),
+                tronscan_api_key: "test-key".to_string(),
             },
             wallets: vec![],
         };

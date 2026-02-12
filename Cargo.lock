@@ -1573,18 +1573,23 @@ dependencies = [
  "argon2",
  "axum",
  "clap",
+ "fast32",
+ "kanau",
  "ocrch-core",
  "ocrch-sdk",
  "rand 0.9.2",
  "serde",
+ "serde_json",
  "sqlx",
  "thiserror",
+ "time",
  "tokio",
  "tokio-stream",
  "toml",
  "tower",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

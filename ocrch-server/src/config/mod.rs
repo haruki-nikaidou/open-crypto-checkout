@@ -10,7 +10,7 @@ use crate::config::file::{
     FileConfig, MerchantConfig as FileMerchantConfig, WalletConfig as FileWalletConfig,
 };
 use crate::config::runtime::{
-    AdminConfig, MerchantConfig, ServerConfig, SharedConfig, WalletConfig,
+    AdminConfig, ApiKeysConfig, MerchantConfig, ServerConfig, SharedConfig, WalletConfig,
 };
 use std::net::SocketAddr;
 use std::path::Path;
@@ -46,6 +46,7 @@ pub struct LoadedConfig {
     pub admin: AdminConfig,
     pub merchant: MerchantConfig,
     pub wallets: Vec<WalletConfig>,
+    pub api_keys: ApiKeysConfig,
 }
 
 impl LoadedConfig {
@@ -56,6 +57,7 @@ impl LoadedConfig {
             admin: Arc::new(RwLock::new(self.admin)),
             merchant: Arc::new(RwLock::new(self.merchant)),
             wallets: Arc::new(RwLock::new(self.wallets)),
+            api_keys: Arc::new(RwLock::new(self.api_keys)),
         }
     }
 }
@@ -172,6 +174,10 @@ impl ConfigLoader {
             admin: AdminConfig::new(secret_hash),
             merchant: convert_merchant(file_config.merchant),
             wallets,
+            api_keys: ApiKeysConfig {
+                etherscan_api_key: file_config.api_keys.etherscan_api_key,
+                tronscan_api_key: file_config.api_keys.tronscan_api_key,
+            },
         }
     }
 }
