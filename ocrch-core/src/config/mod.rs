@@ -5,11 +5,13 @@
 //! by the server crate.
 
 mod admin;
+mod config_store;
 mod merchant;
 mod server;
 mod wallet;
 
 pub use admin::AdminConfig;
+pub use config_store::{ConfigStore, ConfigWatcher};
 pub use merchant::MerchantConfig;
 pub use server::ServerConfig;
 pub use wallet::WalletConfig;

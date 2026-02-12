@@ -14,5 +14,5 @@ pub mod webhook_sender;
 
 pub use blockchain_sync::{BlockchainSync, Erc20BlockchainSync, SyncError, Trc20BlockchainSync};
 pub use order_watcher::OrderBookWatcher;
-pub use pooling_manager::PoolingManager;
+pub use pooling_manager::{PoolingKey, PoolingManager, PoolingManagerConfig};
 pub use webhook_sender::WebhookSender;
