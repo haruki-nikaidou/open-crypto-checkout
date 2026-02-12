@@ -4,9 +4,9 @@
 //! notification mechanism so that consumers can react to config changes
 //! without polling.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{watch, RwLock, RwLockReadGuard};
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::{RwLock, RwLockReadGuard, watch};
 
 /// A shared, versioned configuration store with change notification.
 ///
