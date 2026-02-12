@@ -1,4 +1,3 @@
-use crate::entities::order_records::OrderStatus;
 use crate::entities::{StablecoinName, TransferStatus};
 use crate::framework::DatabaseProcessor;
 use kanau::processor::Processor;

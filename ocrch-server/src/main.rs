@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Get database URL from environment
     let database_url = get_database_url().inspect_err(|e| {
-        tracing::error!("DATABASE_URL environment variable not set");
+        tracing::error!("DATABASE_URL environment variable not set: {e}");
     })?;
 
     // Create database connection pool

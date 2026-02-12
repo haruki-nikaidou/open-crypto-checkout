@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM trc20_pending_deposits AS d\n            USING UNNEST($1::uuid[], $2::bigint[]) AS u(order_id, except_id)\n            WHERE d.\"order\" = u.order_id AND d.id != u.except_id\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "49ed95be55cbfc871704d9550d0e46988f9c135b871d8efd95b4cc1e8f90db3b"
+}

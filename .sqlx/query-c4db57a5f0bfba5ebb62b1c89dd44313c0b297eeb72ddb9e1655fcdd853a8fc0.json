@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE erc20_token_transfers AS t\n            SET status = 'matched', fulfillment_id = u.fulfillment_id\n            FROM UNNEST($1::bigint[], $2::bigint[]) AS u(id, fulfillment_id)\n            WHERE t.id = u.id\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8Array",
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c4db57a5f0bfba5ebb62b1c89dd44313c0b297eeb72ddb9e1655fcdd853a8fc0"
+}

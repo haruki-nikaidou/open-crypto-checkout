@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM erc20_pending_deposits AS d\n            USING UNNEST($1::uuid[], $2::bigint[]) AS u(order_id, except_id)\n            WHERE d.\"order\" = u.order_id AND d.id != u.except_id\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fe6507da482ccafd01742c9e3920bd13b0553d59c5a66bc24b99d5c507e66f8d"
+}

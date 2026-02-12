@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM erc20_pending_deposits\n            WHERE \"order\" = ANY($1)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c45594e8d400e4725e476055f991db19b3debc68cfbfc02983c1ccc134ffd069"
+}

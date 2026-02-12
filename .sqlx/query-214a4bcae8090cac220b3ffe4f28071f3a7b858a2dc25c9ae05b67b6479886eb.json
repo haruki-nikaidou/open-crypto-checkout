@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE order_records\n            SET status = 'paid'\n            WHERE order_id = ANY($1)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "214a4bcae8090cac220b3ffe4f28071f3a7b858a2dc25c9ae05b67b6479886eb"
+}

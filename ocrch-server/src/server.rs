@@ -2,7 +2,7 @@
 
 use crate::shutdown::shutdown_signal;
 use crate::state::AppState;
-use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::get};
+use axum::{Json, Router, response::IntoResponse, routing::get};
 use serde::Serialize;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
