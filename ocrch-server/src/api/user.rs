@@ -10,10 +10,14 @@
 //! - `POST /orders/{order_id}/payment` – select payment method / create pending deposit
 //! - `POST /orders/{order_id}/cancel`  – cancel order
 //! - `GET  /orders/{order_id}/status`  – poll order status
+//! - `GET  /orders/{order_id}/ws`      – WebSocket order status stream
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{
+        Path, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -32,7 +36,7 @@ use ocrch_sdk::objects::{ChainCoinPair, OrderResponse, PaymentDetail, SelectPaym
 use uuid::Uuid;
 
 use crate::api::extractors::VerifiedUrl;
-use crate::state::AppState;
+use crate::state::{AppState, OrderStatusUpdate};
 
 /// Build the User API router.
 pub fn router() -> Router<AppState> {
@@ -41,6 +45,7 @@ pub fn router() -> Router<AppState> {
         .route("/orders/{order_id}/payment", post(create_payment))
         .route("/orders/{order_id}/cancel", post(cancel_order))
         .route("/orders/{order_id}/status", get(get_order_status))
+        .route("/orders/{order_id}/ws", get(order_status_ws))
 }
 
 /// Convert an `OrderRecord` (DB model) into an `OrderResponse` (API model).
@@ -238,6 +243,12 @@ async fn cancel_order(
         tracing::error!(error = %e, "Failed to emit OrderStatusChanged webhook event");
     }
 
+    // 3b. Broadcast to WebSocket clients
+    let _ = state.order_status_tx.send(OrderStatusUpdate {
+        order_id,
+        new_status: OrderStatus::Cancelled,
+    });
+
     // 4. Return updated order (re-read to get consistent state)
     let updated = processor
         .process(GetOrderRecordById { order_id })
@@ -271,6 +282,187 @@ async fn get_order_status(
         .ok_or(UserApiError::NotFound)?;
 
     Ok(Json(to_response(&record)))
+}
+
+// ---------------------------------------------------------------------------
+// GET /orders/{order_id}/ws
+// ---------------------------------------------------------------------------
+
+/// `GET /orders/{order_id}/ws` — WebSocket order status stream.
+///
+/// Upgrades the HTTP connection to a WebSocket and pushes
+/// [`OrderResponse`] JSON frames whenever the order status changes.
+/// The first frame is always the current status; the connection is
+/// closed after a terminal status (`Paid`, `Expired`, `Cancelled`).
+async fn order_status_ws(
+    state: State<AppState>,
+    _verified: VerifiedUrl,
+    Path(order_id): Path<Uuid>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    let app_state = state.0.clone();
+    ws.on_upgrade(move |socket| handle_order_ws(socket, app_state, order_id))
+}
+
+/// Returns `true` if the given status is a terminal (final) state.
+fn is_terminal(status: OrderStatus) -> bool {
+    matches!(
+        status,
+        OrderStatus::Paid | OrderStatus::Expired | OrderStatus::Cancelled
+    )
+}
+
+/// Background task that drives a single WebSocket connection.
+///
+/// 1. Sends the current order status as the first message.
+/// 2. If already terminal, closes immediately.
+/// 3. Otherwise subscribes to the broadcast channel and forwards
+///    status updates for this `order_id` until a terminal state is
+///    reached or the client disconnects.
+async fn handle_order_ws(mut socket: WebSocket, state: AppState, order_id: Uuid) {
+    let processor = DatabaseProcessor {
+        pool: state.db.clone(),
+    };
+
+    // Subscribe to the broadcast channel *before* reading the current
+    // status so that any update that races with our DB query is still
+    // captured in the receiver's buffer.
+    let mut broadcast_rx = state.order_status_tx.subscribe();
+
+    // --- Send current status as the first message --------------------------
+    let record = match processor.process(GetOrderRecordById { order_id }).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            let _ = socket
+                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 4004,
+                    reason: "order not found".into(),
+                })))
+                .await;
+            return;
+        }
+        Err(e) => {
+            tracing::error!(error = %e, %order_id, "WS: failed to query order");
+            let _ = socket
+                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 1011,
+                    reason: "internal error".into(),
+                })))
+                .await;
+            return;
+        }
+    };
+
+    let response = to_response(&record);
+    if send_json(&mut socket, &response).await.is_err() {
+        return;
+    }
+
+    // If already terminal, close after the first message
+    if is_terminal(record.status) {
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    }
+
+    // --- Relay updates until terminal or disconnect ------------------------
+
+    loop {
+        tokio::select! {
+            // Incoming broadcast event
+            result = broadcast_rx.recv() => {
+                match result {
+                    Ok(update) if update.order_id == order_id => {
+                        // Re-read from DB for a consistent OrderResponse
+                        let record = match processor
+                            .process(GetOrderRecordById { order_id })
+                            .await
+                        {
+                            Ok(Some(r)) => r,
+                            Ok(None) => break,
+                            Err(e) => {
+                                tracing::error!(
+                                    error = %e,
+                                    %order_id,
+                                    "WS: failed to query order on update"
+                                );
+                                break;
+                            }
+                        };
+
+                        let response = to_response(&record);
+                        if send_json(&mut socket, &response).await.is_err() {
+                            return; // client gone
+                        }
+
+                        if is_terminal(record.status) {
+                            let _ = socket.send(Message::Close(None)).await;
+                            return;
+                        }
+                    }
+                    Ok(_) => {
+                        // Update for a different order — ignore
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(
+                            %order_id,
+                            skipped = n,
+                            "WS: broadcast receiver lagged, checking current status"
+                        );
+                        // After lag, re-read current status in case we missed ours
+                        let record = match processor
+                            .process(GetOrderRecordById { order_id })
+                            .await
+                        {
+                            Ok(Some(r)) => r,
+                            Ok(None) => break,
+                            Err(_) => break,
+                        };
+
+                        let response = to_response(&record);
+                        if send_json(&mut socket, &response).await.is_err() {
+                            return;
+                        }
+                        if is_terminal(record.status) {
+                            let _ = socket.send(Message::Close(None)).await;
+                            return;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // Broadcast channel closed (server shutting down)
+                        break;
+                    }
+                }
+            }
+
+            // Incoming WebSocket frame from the client (ping/pong/close)
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => {
+                        // Client disconnected
+                        return;
+                    }
+                    Some(Ok(_)) => {
+                        // Ignore other client messages (text, binary, ping)
+                    }
+                    Some(Err(_)) => {
+                        // WebSocket error — drop the connection
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    let _ = socket.send(Message::Close(None)).await;
+}
+
+/// Serialize `value` as JSON and send it as a text WebSocket frame.
+///
+/// Returns `Err(())` if the send fails (client disconnected).
+async fn send_json<T: serde::Serialize>(socket: &mut WebSocket, value: &T) -> Result<(), ()> {
+    let json = serde_json::to_string(value).map_err(|_| ())?;
+    socket.send(Message::Text(json.into())).await.map_err(|_| ())
 }
 
 // ---------------------------------------------------------------------------

@@ -14,8 +14,8 @@ use ocrch_core::config::{ConfigStore, WalletConfig};
 use ocrch_core::entities::StablecoinName;
 use ocrch_core::entities::erc20_pending_deposit::EtherScanChain;
 use ocrch_core::events::{
-    BlockchainTarget, EventSenders, match_tick_channel, pending_deposit_changed_channel,
-    pooling_tick_channel, webhook_event_channel,
+    BlockchainTarget, EventSenders, WebhookEvent, match_tick_channel,
+    pending_deposit_changed_channel, pooling_tick_channel, webhook_event_channel,
 };
 use ocrch_core::framework::DatabaseProcessor;
 use ocrch_core::processors::blockchain_sync::BlockchainSyncRunner;
@@ -28,11 +28,11 @@ use server::{build_router, run_server};
 use shutdown::spawn_config_reload_handler;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
-use state::AppState;
+use state::{AppState, OrderStatusUpdate};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -58,6 +58,8 @@ struct Args {
 struct EventPipeline {
     /// Event senders for API handlers to emit events.
     event_senders: EventSenders,
+    /// Broadcast sender for order status changes (consumed by WebSocket handlers).
+    order_status_tx: broadcast::Sender<OrderStatusUpdate>,
     /// Shutdown signal sender -- set to `true` to stop all processors.
     shutdown_tx: watch::Sender<bool>,
     /// Join handles for all spawned processor tasks.
@@ -123,7 +125,12 @@ async fn main() -> anyhow::Result<()> {
     let pipeline = setup_event_pipeline(&shared_config, &db_pool).await;
 
     // Create application state
-    let state = AppState::new(db_pool.clone(), shared_config, pipeline.event_senders);
+    let state = AppState::new(
+        db_pool.clone(),
+        shared_config,
+        pipeline.event_senders,
+        pipeline.order_status_tx,
+    );
 
     // Spawn config reload handler (listens for SIGHUP)
     let shutdown_notify =
@@ -237,17 +244,50 @@ async fn setup_event_pipeline(
     });
     join_handles.push(pm_handle);
 
+    // -- Order status broadcast channel (consumed by WebSocket handlers) ----
+    let (order_status_tx, _order_status_rx) = broadcast::channel::<OrderStatusUpdate>(256);
+
     // -- OrderBookWatcher --------------------------------------------------
+    //
+    // The watcher writes to an intermediate channel (`obw_tx`). A fan-out
+    // task reads from it, broadcasts `OrderStatusChanged` events to
+    // WebSocket clients, and forwards every event to the real `webhook_tx`.
+    let (obw_tx, mut obw_rx) = webhook_event_channel();
+
     let obw_shutdown_rx = shutdown_rx.clone();
-    let obw_webhook_tx = webhook_tx.clone();
     let obw_pool = db_pool.clone();
     let obw_handle = tokio::spawn(async move {
         let watcher = OrderBookWatcher {
             processor: DatabaseProcessor { pool: obw_pool },
         };
-        watcher.run(obw_shutdown_rx, match_rx, obw_webhook_tx).await;
+        watcher.run(obw_shutdown_rx, match_rx, obw_tx).await;
     });
     join_handles.push(obw_handle);
+
+    // -- Fan-out interceptor -----------------------------------------------
+    let fanout_broadcast_tx = order_status_tx.clone();
+    let fanout_webhook_tx = webhook_tx.clone();
+    let fanout_handle = tokio::spawn(async move {
+        while let Some(event) = obw_rx.recv().await {
+            // Broadcast order-status changes to WebSocket clients
+            if let WebhookEvent::OrderStatusChanged {
+                order_id,
+                new_status,
+            } = &event
+            {
+                let _ = fanout_broadcast_tx.send(OrderStatusUpdate {
+                    order_id: *order_id,
+                    new_status: *new_status,
+                });
+            }
+            // Forward every event to the real WebhookSender
+            if let Err(e) = fanout_webhook_tx.send(event).await {
+                tracing::warn!(error = %e, "Fan-out: failed to forward event to WebhookSender");
+            }
+        }
+        tracing::info!("Fan-out interceptor shut down");
+    });
+    join_handles.push(fanout_handle);
 
     // -- WebhookSender -----------------------------------------------------
     let ws_shutdown_rx = shutdown_rx.clone();
@@ -267,6 +307,7 @@ async fn setup_event_pipeline(
 
     EventPipeline {
         event_senders,
+        order_status_tx,
         shutdown_tx,
         join_handles,
         pooling_config_store,
