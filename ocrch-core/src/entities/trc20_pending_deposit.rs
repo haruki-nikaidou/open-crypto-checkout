@@ -60,6 +60,50 @@ impl Processor<GetTrc20DepositsForMatching> for DatabaseProcessor {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Trc20PendingDepositInsert {
+    pub order: uuid::Uuid,
+    pub token_name: StablecoinName,
+    pub user_address: Option<String>,
+    pub wallet_address: String,
+    pub value: rust_decimal::Decimal,
+}
+
+impl Processor<Trc20PendingDepositInsert> for DatabaseProcessor {
+    type Output = Trc20PendingDeposit;
+    type Error = sqlx::Error;
+    #[tracing::instrument(skip_all, err, name = "SQL:Trc20PendingDepositInsert")]
+    async fn process(
+        &self,
+        insert: Trc20PendingDepositInsert,
+    ) -> Result<Trc20PendingDeposit, sqlx::Error> {
+        let deposit = sqlx::query_as!(
+            Trc20PendingDeposit,
+            r#"
+            INSERT INTO trc20_pending_deposits ("order", token_name, user_address, wallet_address, value)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING
+            id,
+            "order",
+            token_name as "token_name: StablecoinName",
+            user_address,
+            wallet_address,
+            value,
+            started_at,
+            last_scanned_at
+            "#,
+            insert.order,
+            insert.token_name as StablecoinName,
+            insert.user_address as Option<String>,
+            insert.wallet_address as String,
+            insert.value,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(deposit)
+    }
+}
+
 impl Trc20PendingDeposit {
     /// Delete pending deposits for an order except for one (the matched one), within a transaction.
     pub async fn delete_for_order_except_tx(

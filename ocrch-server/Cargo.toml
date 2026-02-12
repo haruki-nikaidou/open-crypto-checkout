@@ -31,10 +31,12 @@ clap = { version = "4", features = ["derive", "env"] }
 # Security
 argon2 = "0.5"
 rand = { workspace = true }
+ring = { workspace = true }
 
 # Data types
 uuid = { workspace = true }
 time = { workspace = true }
+url = { workspace = true }
 
 # Error handling
 anyhow = { workspace = true }

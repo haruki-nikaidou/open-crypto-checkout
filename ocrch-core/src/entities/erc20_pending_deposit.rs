@@ -170,6 +170,23 @@ impl Processor<GetErc20DepositsForMatching> for DatabaseProcessor {
 }
 
 impl Erc20PendingDeposit {
+    /// Delete all pending deposits for an order within a transaction.
+    pub async fn delete_for_order_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        order_id: uuid::Uuid,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query!(
+            r#"
+            DELETE FROM erc20_pending_deposits
+            WHERE "order" = $1
+            "#,
+            order_id,
+        )
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
     /// Delete pending deposits for multiple orders, each keeping one (the matched one).
     ///
     /// Uses `UNNEST` to batch-delete in a single SQL statement.

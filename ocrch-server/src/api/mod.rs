@@ -2,3 +2,4 @@
 
 pub mod extractors;
 pub mod service;
+pub mod user;

@@ -15,6 +15,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health", get(health_check))
         // Service API (application backend)
         .nest("/api/v1/service", api::service::router())
+        // User API (checkout frontend)
+        .nest("/api/v1/user", api::user::router())
         // Add state to all routes
         .with_state(state)
 }

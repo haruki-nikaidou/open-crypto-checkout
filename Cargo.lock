@@ -1578,6 +1578,7 @@ dependencies = [
  "ocrch-core",
  "ocrch-sdk",
  "rand 0.9.2",
+ "ring",
  "serde",
  "serde_json",
  "sqlx",
@@ -1589,6 +1590,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 
