@@ -4,7 +4,7 @@ use kanau::processor::Processor;
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct Trc20TokenTransfer {
     pub id: i64,
     pub token_name: StablecoinName,
@@ -326,5 +326,90 @@ impl Processor<HandleTrc20MatchedTrans> for DatabaseProcessor {
 
         tx.commit().await?;
         Ok(())
+    }
+}
+
+/// List TRC-20 transfers by wallet address with pagination and optional filters.
+#[derive(Debug, Clone)]
+pub struct ListTrc20TransfersByWallet {
+    pub wallet_address: String,
+    pub limit: i64,
+    pub offset: i64,
+    pub status: Option<TransferStatus>,
+    pub token: Option<StablecoinName>,
+}
+
+impl Processor<ListTrc20TransfersByWallet> for DatabaseProcessor {
+    type Output = Vec<Trc20TokenTransfer>;
+    type Error = sqlx::Error;
+    #[tracing::instrument(skip_all, err, name = "SQL:ListTrc20TransfersByWallet")]
+    async fn process(
+        &self,
+        query: ListTrc20TransfersByWallet,
+    ) -> Result<Vec<Trc20TokenTransfer>, sqlx::Error> {
+        let mut qb = sqlx::QueryBuilder::new(
+            "SELECT id, token_name, from_address, to_address, txn_hash, value, \
+             block_number, block_timestamp, blockchain_confirmed, created_at, status, \
+             fulfillment_id FROM trc20_token_transfers WHERE to_address = ",
+        );
+        qb.push_bind(&query.wallet_address);
+
+        if let Some(status) = &query.status {
+            qb.push(" AND status = ");
+            qb.push_bind(*status);
+        }
+        if let Some(token) = &query.token {
+            qb.push(" AND token_name = ");
+            qb.push_bind(*token);
+        }
+
+        qb.push(" ORDER BY created_at DESC LIMIT ");
+        qb.push_bind(query.limit);
+        qb.push(" OFFSET ");
+        qb.push_bind(query.offset);
+
+        qb.build_query_as::<Trc20TokenTransfer>()
+            .fetch_all(&self.pool)
+            .await
+    }
+}
+
+/// Get a single TRC-20 transfer by ID.
+#[derive(Debug, Clone)]
+pub struct GetTrc20TransferById {
+    pub id: i64,
+}
+
+impl Processor<GetTrc20TransferById> for DatabaseProcessor {
+    type Output = Option<Trc20TokenTransfer>;
+    type Error = sqlx::Error;
+    #[tracing::instrument(skip_all, err, name = "SQL:GetTrc20TransferById")]
+    async fn process(
+        &self,
+        query: GetTrc20TransferById,
+    ) -> Result<Option<Trc20TokenTransfer>, sqlx::Error> {
+        sqlx::query_as!(
+            Trc20TokenTransfer,
+            r#"
+            SELECT
+                id,
+                token_name as "token_name: StablecoinName",
+                from_address,
+                to_address,
+                txn_hash,
+                value,
+                block_number,
+                block_timestamp,
+                blockchain_confirmed,
+                created_at,
+                status as "status: TransferStatus",
+                fulfillment_id
+            FROM trc20_token_transfers
+            WHERE id = $1
+            "#,
+            query.id,
+        )
+        .fetch_optional(&self.pool)
+        .await
     }
 }

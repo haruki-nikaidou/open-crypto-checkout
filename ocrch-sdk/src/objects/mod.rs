@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod blockchains;
 pub mod create_payment;
 pub mod user;

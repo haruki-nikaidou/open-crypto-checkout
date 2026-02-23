@@ -269,6 +269,46 @@ impl Processor<CreateOrderRecord> for DatabaseProcessor {
     }
 }
 
+/// List order records with pagination and optional filters.
+#[derive(Debug, Clone)]
+pub struct ListOrderRecords {
+    pub limit: i64,
+    pub offset: i64,
+    pub status: Option<OrderStatus>,
+    pub merchant_order_id: Option<String>,
+}
+
+impl Processor<ListOrderRecords> for DatabaseProcessor {
+    type Output = Vec<OrderRecord>;
+    type Error = sqlx::Error;
+    #[tracing::instrument(skip_all, err, name = "SQL:ListOrderRecords")]
+    async fn process(&self, query: ListOrderRecords) -> Result<Vec<OrderRecord>, sqlx::Error> {
+        let mut qb = sqlx::QueryBuilder::new(
+            "SELECT order_id, merchant_order_id, amount, created_at, \
+             status, webhook_success_at, webhook_url, webhook_retry_count, \
+             webhook_last_tried_at FROM order_records WHERE true",
+        );
+
+        if let Some(status) = &query.status {
+            qb.push(" AND status = ");
+            qb.push_bind(*status);
+        }
+        if let Some(mid) = &query.merchant_order_id {
+            qb.push(" AND merchant_order_id = ");
+            qb.push_bind(mid.clone());
+        }
+
+        qb.push(" ORDER BY created_at DESC LIMIT ");
+        qb.push_bind(query.limit);
+        qb.push(" OFFSET ");
+        qb.push_bind(query.offset);
+
+        qb.build_query_as::<OrderRecord>()
+            .fetch_all(&self.pool)
+            .await
+    }
+}
+
 impl OrderRecord {
     /// Update the status of an order within a transaction.
     pub async fn update_status_tx(

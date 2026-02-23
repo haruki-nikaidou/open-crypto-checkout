@@ -5,6 +5,8 @@
 //!   (used by the Service API).
 //! - `VerifiedUrl` — verifies the `Ocrch-Signature` header against a signed frontend URL
 //!   carried in the `Ocrch-Signed-Url` header (used by the User API).
+//! - `AdminAuth` — verifies the `Ocrch-Admin-Authorization` header against the
+//!   argon2-hashed admin secret (used by the Admin API).
 //!
 //! All cryptographic operations are delegated to [`ocrch_sdk::signature`].
 
@@ -231,5 +233,66 @@ impl FromRequestParts<AppState> for VerifiedUrl {
 
         drop(merchant);
         Ok(VerifiedUrl)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AdminAuth — Admin API authentication via plaintext secret header
+// ---------------------------------------------------------------------------
+
+/// An Axum extractor that verifies the `Ocrch-Admin-Authorization` header
+/// against the argon2-hashed admin secret stored in config.
+///
+/// Implements `FromRequestParts` so it can be combined with `Query<T>`,
+/// `Path<T>`, `Json<T>`, etc.
+pub struct AdminAuth;
+
+/// Errors returned by the [`AdminAuth`] extractor.
+#[derive(Debug)]
+pub enum AdminAuthError {
+    MissingHeader,
+    InvalidHeader,
+    InvalidSecret,
+}
+
+impl IntoResponse for AdminAuthError {
+    fn into_response(self) -> Response {
+        let (status, message) = match self {
+            AdminAuthError::MissingHeader => (
+                StatusCode::UNAUTHORIZED,
+                "missing Ocrch-Admin-Authorization header",
+            ),
+            AdminAuthError::InvalidHeader => {
+                (StatusCode::BAD_REQUEST, "invalid authorization header")
+            }
+            AdminAuthError::InvalidSecret => {
+                (StatusCode::UNAUTHORIZED, "invalid admin secret")
+            }
+        };
+        (status, message).into_response()
+    }
+}
+
+impl FromRequestParts<AppState> for AdminAuth {
+    type Rejection = AdminAuthError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let secret = parts
+            .headers
+            .get(ocrch_sdk::signature::ADMIN_AUTH_HEADER)
+            .ok_or(AdminAuthError::MissingHeader)?
+            .to_str()
+            .map_err(|_| AdminAuthError::InvalidHeader)?;
+
+        let admin = state.config.admin.read().await;
+        if !admin.verify_secret(secret) {
+            drop(admin);
+            return Err(AdminAuthError::InvalidSecret);
+        }
+        drop(admin);
+        Ok(AdminAuth)
     }
 }

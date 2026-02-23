@@ -2,7 +2,7 @@ use crate::entities::StablecoinName;
 use crate::framework::DatabaseProcessor;
 use kanau::processor::Processor;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct Erc20PendingDeposit {
     pub id: i64,
     pub order: uuid::Uuid,
@@ -166,6 +166,52 @@ impl Processor<GetErc20DepositsForMatching> for DatabaseProcessor {
         .fetch_all(&self.pool)
         .await?;
         Ok(deposits)
+    }
+}
+
+/// List ERC-20 pending deposits with pagination and optional filters.
+#[derive(Debug, Clone)]
+pub struct ListErc20PendingDeposits {
+    pub limit: i64,
+    pub offset: i64,
+    pub order_id: Option<uuid::Uuid>,
+    pub chain: Option<EtherScanChain>,
+    pub token: Option<StablecoinName>,
+}
+
+impl Processor<ListErc20PendingDeposits> for DatabaseProcessor {
+    type Output = Vec<Erc20PendingDeposit>;
+    type Error = sqlx::Error;
+    #[tracing::instrument(skip_all, err, name = "SQL:ListErc20PendingDeposits")]
+    async fn process(
+        &self,
+        query: ListErc20PendingDeposits,
+    ) -> Result<Vec<Erc20PendingDeposit>, sqlx::Error> {
+        let mut qb = sqlx::QueryBuilder::new(
+            r#"SELECT id, "order", token_name, chain, user_address, wallet_address, value, started_at, last_scanned_at FROM erc20_pending_deposits WHERE true"#,
+        );
+
+        if let Some(order_id) = &query.order_id {
+            qb.push(r#" AND "order" = "#);
+            qb.push_bind(*order_id);
+        }
+        if let Some(chain) = &query.chain {
+            qb.push(" AND chain = ");
+            qb.push_bind(*chain);
+        }
+        if let Some(token) = &query.token {
+            qb.push(" AND token_name = ");
+            qb.push_bind(*token);
+        }
+
+        qb.push(" ORDER BY started_at DESC LIMIT ");
+        qb.push_bind(query.limit);
+        qb.push(" OFFSET ");
+        qb.push_bind(query.offset);
+
+        qb.build_query_as::<Erc20PendingDeposit>()
+            .fetch_all(&self.pool)
+            .await
     }
 }
 

@@ -104,6 +104,47 @@ impl Processor<Trc20PendingDepositInsert> for DatabaseProcessor {
     }
 }
 
+/// List TRC-20 pending deposits with pagination and optional filters.
+#[derive(Debug, Clone)]
+pub struct ListTrc20PendingDeposits {
+    pub limit: i64,
+    pub offset: i64,
+    pub order_id: Option<uuid::Uuid>,
+    pub token: Option<StablecoinName>,
+}
+
+impl Processor<ListTrc20PendingDeposits> for DatabaseProcessor {
+    type Output = Vec<Trc20PendingDeposit>;
+    type Error = sqlx::Error;
+    #[tracing::instrument(skip_all, err, name = "SQL:ListTrc20PendingDeposits")]
+    async fn process(
+        &self,
+        query: ListTrc20PendingDeposits,
+    ) -> Result<Vec<Trc20PendingDeposit>, sqlx::Error> {
+        let mut qb = sqlx::QueryBuilder::new(
+            r#"SELECT id, "order", token_name, user_address, wallet_address, value, started_at, last_scanned_at FROM trc20_pending_deposits WHERE true"#,
+        );
+
+        if let Some(order_id) = &query.order_id {
+            qb.push(r#" AND "order" = "#);
+            qb.push_bind(*order_id);
+        }
+        if let Some(token) = &query.token {
+            qb.push(" AND token_name = ");
+            qb.push_bind(*token);
+        }
+
+        qb.push(" ORDER BY started_at DESC LIMIT ");
+        qb.push_bind(query.limit);
+        qb.push(" OFFSET ");
+        qb.push_bind(query.offset);
+
+        qb.build_query_as::<Trc20PendingDeposit>()
+            .fetch_all(&self.pool)
+            .await
+    }
+}
+
 impl Trc20PendingDeposit {
     /// Delete pending deposits for an order except for one (the matched one), within a transaction.
     pub async fn delete_for_order_except_tx(

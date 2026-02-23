@@ -21,6 +21,9 @@ pub const SIGNATURE_HEADER: &str = "Ocrch-Signature";
 /// Header name carrying the signed frontend URL (User API).
 pub const SIGNED_URL_HEADER: &str = "Ocrch-Signed-Url";
 
+/// Header name for admin API authentication (plaintext secret).
+pub const ADMIN_AUTH_HEADER: &str = "Ocrch-Admin-Authorization";
+
 /// Maximum allowed age of a signature (in seconds).
 pub const MAX_SIGNATURE_AGE: i64 = 5 * 60;
 
