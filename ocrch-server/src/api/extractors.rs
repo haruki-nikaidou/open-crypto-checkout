@@ -46,11 +46,11 @@ pub enum SignedBodyError {
     /// Base64 decoding of the signature failed.
     InvalidBase64,
     /// Failed to read request body.
-    BodyReadError(String),
+    BodyReadError,
     /// Failed to deserialize JSON body.
-    JsonError(String),
+    JsonError(serde_json::Error),
     /// HMAC verification failed or timestamp too old.
-    VerificationFailed(String),
+    VerificationFailed,
 }
 
 impl IntoResponse for SignedBodyError {
@@ -66,11 +66,11 @@ impl IntoResponse for SignedBodyError {
             SignedBodyError::InvalidBase64 => {
                 (StatusCode::BAD_REQUEST, "invalid signature encoding")
             }
-            SignedBodyError::BodyReadError(_) => {
+            SignedBodyError::BodyReadError => {
                 (StatusCode::BAD_REQUEST, "failed to read request body")
             }
             SignedBodyError::JsonError(_) => (StatusCode::BAD_REQUEST, "invalid JSON body"),
-            SignedBodyError::VerificationFailed(_) => {
+            SignedBodyError::VerificationFailed => {
                 (StatusCode::UNAUTHORIZED, "signature verification failed")
             }
         };
@@ -116,14 +116,14 @@ impl<T: Signature + Send> FromRequest<AppState> for SignedBody<T> {
         // 2. Read the raw body bytes
         let body_bytes = axum::body::to_bytes(req.into_body(), 1024 * 1024)
             .await
-            .map_err(|e| SignedBodyError::BodyReadError(e.to_string()))?;
+            .map_err(|e| SignedBodyError::BodyReadError)?;
 
         let json = String::from_utf8(body_bytes.to_vec())
-            .map_err(|e| SignedBodyError::BodyReadError(e.to_string()))?;
+            .map_err(|e| SignedBodyError::BodyReadError)?;
 
         // 3. Deserialize the body to get the typed value
         let body: T =
-            serde_json::from_str(&json).map_err(|e| SignedBodyError::JsonError(e.to_string()))?;
+            serde_json::from_str(&json).map_err(|e| SignedBodyError::JsonError(e))?;
 
         // 4. Reconstruct SignedObject and verify against merchant secret
         //    (done in a block to avoid holding the RwLock guard across an await)
@@ -139,7 +139,7 @@ impl<T: Signature + Send> FromRequest<AppState> for SignedBody<T> {
 
         let verified_body = signed
             .verify(secret)
-            .map_err(|e| SignedBodyError::VerificationFailed(e.to_string()))?;
+            .map_err(|e| SignedBodyError::VerificationFailed)?;
 
         drop(merchant);
 
