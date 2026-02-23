@@ -23,7 +23,7 @@ use crate::state::AppState;
 /// closed after a terminal status (`Paid`, `Expired`, `Cancelled`).
 pub(super) async fn order_status_ws(
     state: State<AppState>,
-    _verified: VerifiedUrl,
+    _url_signature_verified_before_upgrade: VerifiedUrl,
     Path(order_id): Path<Uuid>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {

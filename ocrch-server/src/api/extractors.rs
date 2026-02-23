@@ -265,9 +265,7 @@ impl IntoResponse for AdminAuthError {
             AdminAuthError::InvalidHeader => {
                 (StatusCode::BAD_REQUEST, "invalid authorization header")
             }
-            AdminAuthError::InvalidSecret => {
-                (StatusCode::UNAUTHORIZED, "invalid admin secret")
-            }
+            AdminAuthError::InvalidSecret => (StatusCode::UNAUTHORIZED, "invalid admin secret"),
         };
         (status, message).into_response()
     }

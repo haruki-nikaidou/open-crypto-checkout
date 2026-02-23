@@ -1,8 +1,8 @@
 use axum::{Json, extract::Query, response::IntoResponse};
 use kanau::processor::Processor;
+use ocrch_core::entities::StablecoinName;
 use ocrch_core::entities::erc20_pending_deposit::{EtherScanChain, ListErc20PendingDeposits};
 use ocrch_core::entities::trc20_pending_deposit::ListTrc20PendingDeposits;
-use ocrch_core::entities::StablecoinName;
 use ocrch_core::framework::DatabaseProcessor;
 use ocrch_sdk::objects::admin::{AdminPendingDepositResponse, ListDepositsQuery, clamp_pagination};
 use ocrch_sdk::objects::blockchains::Blockchain;
@@ -35,7 +35,9 @@ pub async fn list_deposits(
     let mut results: Vec<AdminPendingDepositResponse> = Vec::new();
 
     if !is_tron_only {
-        let erc20_chain = query.blockchain.and_then(|b| blockchain_to_etherscan(b).ok());
+        let erc20_chain = query
+            .blockchain
+            .and_then(|b| blockchain_to_etherscan(b).ok());
 
         let erc20 = processor
             .process(ListErc20PendingDeposits {

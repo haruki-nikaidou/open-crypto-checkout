@@ -40,10 +40,7 @@ pub fn router() -> Router<AppState> {
             get(list_transfers::list_transfers),
         )
         .route("/wallets", get(show_wallets::show_wallets))
-        .route(
-            "/orders/{order_id}/mark-paid",
-            post(mark_paid::mark_paid),
-        )
+        .route("/orders/{order_id}/mark-paid", post(mark_paid::mark_paid))
         .route(
             "/orders/{order_id}/resend-webhook",
             post(resend_order_webhook::resend_order_webhook),
@@ -100,7 +97,11 @@ pub(crate) fn order_to_admin_response(r: &OrderRecord) -> AdminOrderResponse {
         created_at: r.created_at.assume_utc().unix_timestamp(),
         webhook_url: r.webhook_url.clone(),
         webhook_retry_count: r.webhook_retry_count,
-        webhook_success_at: r.webhook_success_at.map(|t| t.assume_utc().unix_timestamp()),
-        webhook_last_tried_at: r.webhook_last_tried_at.map(|t| t.assume_utc().unix_timestamp()),
+        webhook_success_at: r
+            .webhook_success_at
+            .map(|t| t.assume_utc().unix_timestamp()),
+        webhook_last_tried_at: r
+            .webhook_last_tried_at
+            .map(|t| t.assume_utc().unix_timestamp()),
     }
 }

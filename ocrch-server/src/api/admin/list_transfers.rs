@@ -1,5 +1,5 @@
-use axum::{Json, extract::Query, response::IntoResponse};
 use axum::extract::Path;
+use axum::{Json, extract::Query, response::IntoResponse};
 use kanau::processor::Processor;
 use ocrch_core::entities::erc20_pending_deposit::EtherScanChain;
 use ocrch_core::entities::erc20_transfer::ListErc20TransfersByWallet;
@@ -38,7 +38,9 @@ pub async fn list_transfers(
     let mut results: Vec<AdminTransferResponse> = Vec::new();
 
     if !is_tron_only {
-        let erc20_chain = query.blockchain.and_then(|b| blockchain_to_etherscan(b).ok());
+        let erc20_chain = query
+            .blockchain
+            .and_then(|b| blockchain_to_etherscan(b).ok());
 
         let erc20 = processor
             .process(ListErc20TransfersByWallet {
