@@ -56,6 +56,9 @@ pub struct MerchantConfig {
     /// List of allowed origins for CORS (frontend URLs).
     #[serde(default)]
     pub allowed_origins: Vec<String>,
+    /// Optional webhook URL for unknown transfer notifications.
+    #[serde(default)]
+    pub unknown_transfer_webhook_url: Option<String>,
 }
 
 /// Wallet configuration for receiving payments.
@@ -128,6 +131,7 @@ enabled_coins = ["USDT", "USDC"]
                 name: "Test Store".to_string(),
                 secret: "secret123".to_string(),
                 allowed_origins: vec![],
+                unknown_transfer_webhook_url: None,
             },
             api_keys: ApiKeysFileConfig {
                 etherscan_api_key: "test-key".to_string(),

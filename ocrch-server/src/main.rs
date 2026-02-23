@@ -292,8 +292,9 @@ async fn setup_event_pipeline(
     // -- WebhookSender -----------------------------------------------------
     let ws_shutdown_rx = shutdown_rx.clone();
     let ws_pool = db_pool.clone();
+    let ws_config = config.clone();
     let ws_handle = tokio::spawn(async move {
-        let sender = WebhookSender::new(DatabaseProcessor { pool: ws_pool });
+        let sender = WebhookSender::new(DatabaseProcessor { pool: ws_pool }, ws_config);
         sender.run(ws_shutdown_rx, webhook_rx).await;
     });
     join_handles.push(ws_handle);

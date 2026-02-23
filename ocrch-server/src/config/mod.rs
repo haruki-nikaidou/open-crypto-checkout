@@ -187,6 +187,7 @@ fn convert_merchant(m: FileMerchantConfig) -> MerchantConfig {
         m.name,
         m.secret.into_bytes().into_boxed_slice(),
         m.allowed_origins,
+        m.unknown_transfer_webhook_url,
     )
 }
 

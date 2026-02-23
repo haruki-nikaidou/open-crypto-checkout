@@ -6,10 +6,8 @@
 //! - Sending HTTP POST requests with signed body
 //! - Handling retries with exponential backoff (2^0 to 2^11 seconds)
 //! - Updating `webhook_retry_count` and `webhook_last_tried_at` in the database
-//!
-//! Note: The actual signature generation is delegated to the caller via a closure.
-//! This keeps cryptographic operations in `ocrch-sdk` where they belong.
 
+use crate::config::SharedConfig;
 use crate::entities::order_records::{
     GetOrderRecordById, GetOrdersForWebhookRetry, IncrementOrderWebhookRetryCount,
     MarkOrderWebhookSuccess, OrderStatus,
@@ -17,7 +15,10 @@ use crate::entities::order_records::{
 use crate::events::{BlockchainTarget, WebhookEvent, WebhookEventReceiver};
 use crate::framework::DatabaseProcessor;
 use kanau::processor::Processor;
-use ocrch_sdk::objects::{OrderStatus as SdkOrderStatus, OrderStatusChangedPayload};
+use ocrch_sdk::objects::{
+    OrderStatus as SdkOrderStatus, OrderStatusChangedPayload, UnknownTransferPayload,
+};
+use ocrch_sdk::signature::SignedObject;
 use sqlx::PgPool;
 use thiserror::Error;
 use tokio::sync::watch;
@@ -55,21 +56,19 @@ pub enum WebhookError {
 pub struct WebhookSender {
     processor: DatabaseProcessor,
     http_client: reqwest::Client,
+    config: SharedConfig,
 }
 
 impl WebhookSender {
     /// Create a new WebhookSender.
-    ///
-    /// # Arguments
-    ///
-    /// * `processor` - Database processor for querying/updating order records
-    pub fn new(processor: DatabaseProcessor) -> Self {
+    pub fn new(processor: DatabaseProcessor, config: SharedConfig) -> Self {
         Self {
             processor,
             http_client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
+            config,
         }
     }
 
@@ -84,10 +83,12 @@ impl WebhookSender {
         // Also spawn a background task to retry failed webhooks
         let pool = self.processor.pool.clone();
         let http_client = self.http_client.clone();
+        let retry_config = self.config.clone();
         let mut retry_shutdown_rx = shutdown_rx.clone();
 
         let retry_handle = tokio::spawn(async move {
-            Self::retry_failed_webhooks_loop(pool, http_client, &mut retry_shutdown_rx).await;
+            Self::retry_failed_webhooks_loop(pool, http_client, retry_config, &mut retry_shutdown_rx)
+                .await;
         });
 
         loop {
@@ -130,7 +131,6 @@ impl WebhookSender {
         order_id: Uuid,
         new_status: OrderStatus,
     ) -> Result<(), WebhookError> {
-        // Get order info
         let Some(order_info) = self
             .processor
             .process(GetOrderRecordById { order_id })
@@ -139,7 +139,6 @@ impl WebhookSender {
             return Err(WebhookError::OrderNotFound(order_id));
         };
 
-        // Build payload using SDK types
         let sdk_status: SdkOrderStatus = new_status.into();
         let payload = OrderStatusChangedPayload {
             event_type: "order_status_changed".to_string(),
@@ -150,18 +149,17 @@ impl WebhookSender {
             timestamp: time::OffsetDateTime::now_utc().unix_timestamp(),
         };
 
-        let body = serde_json::to_string(&payload)
+        let merchant = self.config.merchant.read().await;
+        let signed = SignedObject::new(payload, merchant.secret_bytes())
             .map_err(|e| WebhookError::SerializationError(e.to_string()))?;
+        let signature_header = signed.to_header();
+        let body = signed.json.clone();
+        drop(merchant);
 
-        // Note: Signature support is not yet implemented.
-        // In the future, this would use the merchant's secret from configuration.
-
-        // Send webhook
         let result = self
-            .send_webhook(&order_info.webhook_url, &body, None)
+            .send_webhook(&order_info.webhook_url, &body, Some(&signature_header))
             .await;
 
-        // Update database based on result
         match &result {
             Ok(()) => {
                 self.mark_webhook_success(order_id).await?;
@@ -187,17 +185,54 @@ impl WebhookSender {
         transfer_id: i64,
         blockchain: BlockchainTarget,
     ) -> Result<(), WebhookError> {
-        // For unknown transfers, we need to determine which merchant(s) to notify
-        // This would typically be based on the wallet address configuration
-        // For now, we'll just log it as these webhooks are optional per the spec
+        let merchant = self.config.merchant.read().await;
+        let webhook_url = match &merchant.unknown_transfer_webhook_url {
+            Some(url) => url.clone(),
+            None => {
+                debug!(
+                    transfer_id = transfer_id,
+                    blockchain = %blockchain,
+                    "Unknown transfer detected, no webhook URL configured"
+                );
+                return Ok(());
+            }
+        };
 
-        info!(
-            transfer_id = transfer_id,
-            blockchain = %blockchain,
-            "Unknown transfer detected (webhook delivery not implemented for unknown transfers)"
-        );
+        let payload = UnknownTransferPayload {
+            event_type: "unknown_transfer_received".to_string(),
+            transfer_id,
+            blockchain: blockchain.to_string(),
+            timestamp: time::OffsetDateTime::now_utc().unix_timestamp(),
+        };
 
-        Ok(())
+        let signed = SignedObject::new(payload, merchant.secret_bytes())
+            .map_err(|e| WebhookError::SerializationError(e.to_string()))?;
+        let signature_header = signed.to_header();
+        let body = signed.json.clone();
+        drop(merchant);
+
+        match self
+            .send_webhook(&webhook_url, &body, Some(&signature_header))
+            .await
+        {
+            Ok(()) => {
+                info!(
+                    transfer_id = transfer_id,
+                    blockchain = %blockchain,
+                    "Unknown transfer webhook delivered successfully"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                warn!(
+                    transfer_id = transfer_id,
+                    blockchain = %blockchain,
+                    error = %e,
+                    "Unknown transfer webhook delivery failed"
+                );
+                Err(e)
+            }
+        }
     }
 
     /// Send the webhook HTTP request.
@@ -253,6 +288,7 @@ impl WebhookSender {
     async fn retry_failed_webhooks_loop(
         pool: PgPool,
         http_client: reqwest::Client,
+        config: SharedConfig,
         shutdown_rx: &mut watch::Receiver<bool>,
     ) {
         info!("Webhook retry loop started");
@@ -269,7 +305,7 @@ impl WebhookSender {
                 }
 
                 _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
-                    if let Err(e) = Self::retry_pending_webhooks(&pool, &http_client).await {
+                    if let Err(e) = Self::retry_pending_webhooks(&pool, &http_client, &config).await {
                         error!(error = %e, "Failed to retry webhooks");
                     }
                 }
@@ -281,8 +317,8 @@ impl WebhookSender {
     async fn retry_pending_webhooks(
         pool: &PgPool,
         http_client: &reqwest::Client,
+        config: &SharedConfig,
     ) -> Result<(), WebhookError> {
-        // Find orders that need webhook retry
         let processor = DatabaseProcessor { pool: pool.clone() };
         let orders_to_retry = processor
             .process(GetOrdersForWebhookRetry {
@@ -302,22 +338,26 @@ impl WebhookSender {
                 timestamp: time::OffsetDateTime::now_utc().unix_timestamp(),
             };
 
-            let body = match serde_json::to_string(&payload) {
-                Ok(b) => b,
+            let merchant = config.merchant.read().await;
+            let signed = match SignedObject::new(payload, merchant.secret_bytes()) {
+                Ok(s) => s,
                 Err(e) => {
                     error!(
                         order_id = %order.order_id,
                         error = %e,
-                        "Failed to serialize webhook payload"
+                        "Failed to sign webhook payload"
                     );
                     continue;
                 }
             };
+            let signature_header = signed.to_header();
+            let body = signed.json.clone();
+            drop(merchant);
 
-            // Note: Signature support is not yet implemented for retries.
             let request = http_client
                 .post(&order.webhook_url)
                 .header("Content-Type", "application/json")
+                .header("Ocrch-Signature", &signature_header)
                 .body(body);
 
             match request.send().await {

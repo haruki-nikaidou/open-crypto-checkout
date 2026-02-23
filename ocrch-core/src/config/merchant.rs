@@ -9,15 +9,23 @@ pub struct MerchantConfig {
     pub secret: Box<[u8]>,
     /// List of allowed origins for CORS (frontend URLs).
     pub allowed_origins: Vec<String>,
+    /// Optional webhook URL for unknown transfer notifications.
+    pub unknown_transfer_webhook_url: Option<String>,
 }
 
 impl MerchantConfig {
     /// Create a new MerchantConfig.
-    pub fn new(name: String, secret: impl Into<Box<[u8]>>, allowed_origins: Vec<String>) -> Self {
+    pub fn new(
+        name: String,
+        secret: impl Into<Box<[u8]>>,
+        allowed_origins: Vec<String>,
+        unknown_transfer_webhook_url: Option<String>,
+    ) -> Self {
         Self {
             name,
             secret: secret.into(),
             allowed_origins,
+            unknown_transfer_webhook_url,
         }
     }
 
