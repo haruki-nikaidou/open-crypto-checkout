@@ -32,6 +32,7 @@ use ocrch_core::entities::trc20_pending_deposit::{Trc20PendingDeposit, Trc20Pend
 use ocrch_core::events::{PendingDepositChanged, WebhookEvent};
 use ocrch_core::framework::DatabaseProcessor;
 use ocrch_sdk::objects::blockchains::Blockchain;
+use ocrch_sdk::objects::ws::{WsCloseCode, WsServerMessage};
 use ocrch_sdk::objects::{ChainCoinPair, OrderResponse, PaymentDetail, SelectPaymentMethod};
 use uuid::Uuid;
 
@@ -336,9 +337,17 @@ async fn handle_order_ws(mut socket: WebSocket, state: AppState, order_id: Uuid)
     let record = match processor.process(GetOrderRecordById { order_id }).await {
         Ok(Some(r)) => r,
         Ok(None) => {
+            let _ = send_json(
+                &mut socket,
+                &WsServerMessage::Error {
+                    code: WsCloseCode::ORDER_NOT_FOUND,
+                    reason: "order not found".into(),
+                },
+            )
+            .await;
             let _ = socket
                 .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                    code: 4004,
+                    code: WsCloseCode::ORDER_NOT_FOUND,
                     reason: "order not found".into(),
                 })))
                 .await;
@@ -346,9 +355,17 @@ async fn handle_order_ws(mut socket: WebSocket, state: AppState, order_id: Uuid)
         }
         Err(e) => {
             tracing::error!(error = %e, %order_id, "WS: failed to query order");
+            let _ = send_json(
+                &mut socket,
+                &WsServerMessage::Error {
+                    code: WsCloseCode::INTERNAL_ERROR,
+                    reason: "internal error".into(),
+                },
+            )
+            .await;
             let _ = socket
                 .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                    code: 1011,
+                    code: WsCloseCode::INTERNAL_ERROR,
                     reason: "internal error".into(),
                 })))
                 .await;
@@ -356,8 +373,10 @@ async fn handle_order_ws(mut socket: WebSocket, state: AppState, order_id: Uuid)
         }
     };
 
-    let response = to_response(&record);
-    if send_json(&mut socket, &response).await.is_err() {
+    let msg = WsServerMessage::StatusUpdate {
+        order: to_response(&record),
+    };
+    if send_json(&mut socket, &msg).await.is_err() {
         return;
     }
 
@@ -375,7 +394,6 @@ async fn handle_order_ws(mut socket: WebSocket, state: AppState, order_id: Uuid)
             result = broadcast_rx.recv() => {
                 match result {
                     Ok(update) if update.order_id == order_id => {
-                        // Re-read from DB for a consistent OrderResponse
                         let record = match processor
                             .process(GetOrderRecordById { order_id })
                             .await
@@ -392,9 +410,11 @@ async fn handle_order_ws(mut socket: WebSocket, state: AppState, order_id: Uuid)
                             }
                         };
 
-                        let response = to_response(&record);
-                        if send_json(&mut socket, &response).await.is_err() {
-                            return; // client gone
+                        let msg = WsServerMessage::StatusUpdate {
+                            order: to_response(&record),
+                        };
+                        if send_json(&mut socket, &msg).await.is_err() {
+                            return;
                         }
 
                         if is_terminal(record.status) {
@@ -412,7 +432,6 @@ async fn handle_order_ws(mut socket: WebSocket, state: AppState, order_id: Uuid)
                             skipped = n,
                             "WS: broadcast receiver lagged, checking current status"
                         );
-                        // After lag, re-read current status in case we missed ours
                         let record = match processor
                             .process(GetOrderRecordById { order_id })
                             .await
@@ -422,8 +441,10 @@ async fn handle_order_ws(mut socket: WebSocket, state: AppState, order_id: Uuid)
                             Err(_) => break,
                         };
 
-                        let response = to_response(&record);
-                        if send_json(&mut socket, &response).await.is_err() {
+                        let msg = WsServerMessage::StatusUpdate {
+                            order: to_response(&record),
+                        };
+                        if send_json(&mut socket, &msg).await.is_err() {
                             return;
                         }
                         if is_terminal(record.status) {
