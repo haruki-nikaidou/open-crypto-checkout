@@ -73,7 +73,7 @@ const MAX_LIMIT: i64 = 200;
 const MAX_OFFSET: i64 = 100_000;
 
 /// Query parameters for listing orders.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListOrdersQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,
@@ -84,7 +84,7 @@ pub struct ListOrdersQuery {
 }
 
 /// Query parameters for listing pending deposits.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListDepositsQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,
@@ -96,7 +96,7 @@ pub struct ListDepositsQuery {
 }
 
 /// Query parameters for listing transfers by wallet.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListTransfersQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,

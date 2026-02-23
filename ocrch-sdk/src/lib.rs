@@ -5,3 +5,6 @@
 
 pub mod objects;
 pub mod signature;
+
+#[cfg(feature = "client")]
+pub mod client;

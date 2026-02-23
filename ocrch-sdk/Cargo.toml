@@ -3,6 +3,9 @@ name = "ocrch-sdk"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+client = ["dep:reqwest"]
+
 [dependencies]
 tokio = { workspace = true }
 thiserror = { workspace = true }
@@ -18,6 +21,7 @@ compact_str = { workspace = true }
 time = { workspace = true }
 url = { workspace = true }
 ring = { workspace = true }
+reqwest = { workspace = true, optional = true }
 
 # Security
 argon2 = "0.5"
