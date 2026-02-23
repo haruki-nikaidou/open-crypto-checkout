@@ -120,9 +120,7 @@ async fn create_payment(
     let wallets = state.config.wallets.read().await;
     let wallet = wallets
         .iter()
-        .find(|w| {
-            w.blockchain == body.blockchain && w.enabled_coins.contains(&body.stablecoin)
-        })
+        .find(|w| w.blockchain == body.blockchain && w.enabled_coins.contains(&body.stablecoin))
         .ok_or(UserApiError::WalletNotFound)?;
 
     let wallet_address = wallet.address.clone();
@@ -173,7 +171,12 @@ async fn create_payment(
     };
 
     // 4. Emit PendingDepositChanged event
-    if let Err(e) = state.event_senders.pending_deposit_changed.send(event).await {
+    if let Err(e) = state
+        .event_senders
+        .pending_deposit_changed
+        .send(event)
+        .await
+    {
         tracing::error!(error = %e, "Failed to emit PendingDepositChanged event");
     }
 
@@ -462,7 +465,10 @@ async fn handle_order_ws(mut socket: WebSocket, state: AppState, order_id: Uuid)
 /// Returns `Err(())` if the send fails (client disconnected).
 async fn send_json<T: serde::Serialize>(socket: &mut WebSocket, value: &T) -> Result<(), ()> {
     let json = serde_json::to_string(value).map_err(|_| ())?;
-    socket.send(Message::Text(json.into())).await.map_err(|_| ())
+    socket
+        .send(Message::Text(json.into()))
+        .await
+        .map_err(|_| ())
 }
 
 // ---------------------------------------------------------------------------
@@ -491,9 +497,7 @@ impl IntoResponse for UserApiError {
                 tracing::error!(error = %e, "User API database error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal server error").into_response()
             }
-            UserApiError::NotFound => {
-                (StatusCode::NOT_FOUND, "order not found").into_response()
-            }
+            UserApiError::NotFound => (StatusCode::NOT_FOUND, "order not found").into_response(),
             UserApiError::OrderNotPending => {
                 (StatusCode::CONFLICT, "order is not pending").into_response()
             }
