@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::Signature;
+use crate::signature::Signature;
 
 /// Webhook payload for order status change events.
 #[derive(Debug, Clone, Serialize, Deserialize)]

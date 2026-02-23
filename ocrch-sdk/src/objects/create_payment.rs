@@ -1,4 +1,4 @@
-use crate::objects::Signature;
+use crate::signature::Signature;
 use crate::objects::blockchains;
 use crate::objects::webhook::OrderStatus;
 use serde::{Deserialize, Serialize};

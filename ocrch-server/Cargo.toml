@@ -23,7 +23,6 @@ tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = "0.8"
-fast32 = { workspace = true }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
@@ -31,7 +30,6 @@ clap = { version = "4", features = ["derive", "env"] }
 # Security
 argon2 = "0.5"
 rand = { workspace = true }
-ring = { workspace = true }
 
 # Data types
 uuid = { workspace = true }

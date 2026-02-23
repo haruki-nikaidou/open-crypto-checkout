@@ -1,28 +1,27 @@
-//! Custom Axum extractors for request processing.
+//! Custom Axum extractors for request authentication.
 //!
 //! Provides:
 //! - `SignedBody<T>` — verifies the `Ocrch-Signature` header against a signed JSON body
 //!   (used by the Service API).
 //! - `VerifiedUrl` — verifies the `Ocrch-Signature` header against a signed frontend URL
 //!   carried in the `Ocrch-Signed-Url` header (used by the User API).
+//!
+//! All cryptographic operations are delegated to [`ocrch_sdk::signature`].
 
 use axum::{
     extract::{FromRequest, FromRequestParts, Request},
-    http::{HeaderMap, StatusCode, request::Parts},
+    http::{StatusCode, request::Parts},
     response::{IntoResponse, Response},
 };
-use ocrch_sdk::objects::{Signature, SignedObject};
+use ocrch_sdk::signature::{
+    self, SIGNATURE_HEADER, SIGNED_URL_HEADER, Signature, SignatureError, SignedObject,
+};
 
 use crate::state::AppState;
 
-/// Header name for the HMAC signature.
-const SIGNATURE_HEADER: &str = "Ocrch-Signature";
-
-/// Header name for the signed frontend URL (User API).
-const SIGNED_URL_HEADER: &str = "Ocrch-Signed-Url";
-
-/// Maximum age (in seconds) for a signed URL timestamp.
-const MAX_SIGNATURE_AGE: i64 = 5 * 60;
+// ---------------------------------------------------------------------------
+// SignedBody — Service API authentication via signed JSON body
+// ---------------------------------------------------------------------------
 
 /// An Axum extractor that verifies the `Ocrch-Signature` header and
 /// deserializes + authenticates the JSON request body.
@@ -36,21 +35,32 @@ const MAX_SIGNATURE_AGE: i64 = 5 * 60;
 /// The signature is computed as `HMAC-SHA256("{timestamp}.{json_body}", merchant_secret)`.
 pub struct SignedBody<T: Signature>(pub T);
 
-/// Errors that can occur during signature verification.
-#[derive(Debug)]
+/// Errors that can occur during signed-body verification.
+#[derive(Debug, thiserror::Error)]
 pub enum SignedBodyError {
-    /// The `Ocrch-Signature` header is missing.
+    #[error("missing Ocrch-Signature header")]
     MissingHeader,
-    /// The header value is not valid UTF-8 or has wrong format.
+    #[error("invalid Ocrch-Signature header format")]
     InvalidHeader,
-    /// Base64 decoding of the signature failed.
+    #[error("invalid signature encoding")]
     InvalidBase64,
-    /// Failed to read request body.
+    #[error("failed to read request body")]
     BodyReadError,
-    /// Failed to deserialize JSON body.
+    #[error("invalid JSON body: {0}")]
     JsonError(serde_json::Error),
-    /// HMAC verification failed or timestamp too old.
+    #[error("signature verification failed")]
     VerificationFailed,
+}
+
+impl From<SignatureError> for SignedBodyError {
+    fn from(err: SignatureError) -> Self {
+        match err {
+            SignatureError::InvalidFormat => Self::InvalidHeader,
+            SignatureError::InvalidBase64 => Self::InvalidBase64,
+            SignatureError::Json(e) => Self::JsonError(e),
+            SignatureError::SignatureMismatch | SignatureError::Expired => Self::VerificationFailed,
+        }
+    }
 }
 
 impl IntoResponse for SignedBodyError {
@@ -78,69 +88,29 @@ impl IntoResponse for SignedBodyError {
     }
 }
 
-/// Parse the `Ocrch-Signature` header into (timestamp, raw_signature_bytes).
-fn parse_signature_header(headers: &HeaderMap) -> Result<(i64, Box<[u8]>), SignedBodyError> {
-    let header_value = headers
-        .get(SIGNATURE_HEADER)
-        .ok_or(SignedBodyError::MissingHeader)?
-        .to_str()
-        .map_err(|_| SignedBodyError::InvalidHeader)?;
-
-    // Format: "{timestamp}.{base64_signature}"
-    let dot_pos = header_value
-        .find('.')
-        .ok_or(SignedBodyError::InvalidHeader)?;
-
-    let timestamp_str = &header_value[..dot_pos];
-    let signature_b64 = &header_value[dot_pos + 1..];
-
-    let timestamp: i64 = timestamp_str
-        .parse()
-        .map_err(|_| SignedBodyError::InvalidHeader)?;
-
-    let signature_bytes = fast32::base64::RFC4648_NOPAD
-        .decode_str(signature_b64)
-        .map_err(|_| SignedBodyError::InvalidBase64)?
-        .into_boxed_slice();
-
-    Ok((timestamp, signature_bytes))
-}
-
 impl<T: Signature + Send> FromRequest<AppState> for SignedBody<T> {
     type Rejection = SignedBodyError;
 
     async fn from_request(req: Request, state: &AppState) -> Result<Self, Self::Rejection> {
-        // 1. Parse the signature header before consuming the body
-        let (timestamp, signature_bytes) = parse_signature_header(req.headers())?;
+        let header_value = req
+            .headers()
+            .get(SIGNATURE_HEADER)
+            .ok_or(SignedBodyError::MissingHeader)?
+            .to_str()
+            .map_err(|_| SignedBodyError::InvalidHeader)?
+            .to_owned();
 
-        // 2. Read the raw body bytes
         let body_bytes = axum::body::to_bytes(req.into_body(), 1024 * 1024)
             .await
-            .map_err(|e| SignedBodyError::BodyReadError)?;
+            .map_err(|_| SignedBodyError::BodyReadError)?;
 
-        let json = String::from_utf8(body_bytes.to_vec())
-            .map_err(|e| SignedBodyError::BodyReadError)?;
+        let json =
+            String::from_utf8(body_bytes.to_vec()).map_err(|_| SignedBodyError::BodyReadError)?;
 
-        // 3. Deserialize the body to get the typed value
-        let body: T =
-            serde_json::from_str(&json).map_err(|e| SignedBodyError::JsonError(e))?;
+        let signed = SignedObject::<T>::from_header_and_body(&header_value, json)?;
 
-        // 4. Reconstruct SignedObject and verify against merchant secret
-        //    (done in a block to avoid holding the RwLock guard across an await)
         let merchant = state.config.merchant.read().await;
-        let secret = merchant.secret_bytes();
-
-        let signed = SignedObject {
-            body,
-            timestamp,
-            json,
-            signature: signature_bytes,
-        };
-
-        let verified_body = signed
-            .verify(secret)
-            .map_err(|e| SignedBodyError::VerificationFailed)?;
-
+        let verified_body = signed.verify(merchant.secret_bytes())?;
         drop(merchant);
 
         Ok(SignedBody(verified_body))
@@ -171,20 +141,25 @@ pub struct VerifiedUrl;
 /// Errors returned by the [`VerifiedUrl`] extractor.
 #[derive(Debug)]
 pub enum VerifiedUrlError {
-    /// The `Ocrch-Signature` header is missing.
     MissingSignature,
-    /// The `Ocrch-Signed-Url` header is missing.
     MissingUrl,
-    /// A header value is malformed.
     InvalidHeader,
-    /// Base64 decoding of the signature failed.
     InvalidBase64,
-    /// HMAC verification failed.
     SignatureMismatch,
-    /// The timestamp is too old.
     TimestampTooOld,
-    /// The URL origin is not in the merchant's allowed_origins list.
     OriginNotAllowed,
+}
+
+impl From<SignatureError> for VerifiedUrlError {
+    fn from(err: SignatureError) -> Self {
+        match err {
+            SignatureError::InvalidFormat => Self::InvalidHeader,
+            SignatureError::InvalidBase64 => Self::InvalidBase64,
+            SignatureError::Json(_) => Self::InvalidHeader,
+            SignatureError::SignatureMismatch => Self::SignatureMismatch,
+            SignatureError::Expired => Self::TimestampTooOld,
+        }
+    }
 }
 
 impl IntoResponse for VerifiedUrlError {
@@ -196,22 +171,15 @@ impl IntoResponse for VerifiedUrlError {
             VerifiedUrlError::MissingUrl => {
                 (StatusCode::BAD_REQUEST, "missing Ocrch-Signed-Url header")
             }
-            VerifiedUrlError::InvalidHeader => (
-                StatusCode::BAD_REQUEST,
-                "invalid header format",
-            ),
+            VerifiedUrlError::InvalidHeader => (StatusCode::BAD_REQUEST, "invalid header format"),
             VerifiedUrlError::InvalidBase64 => {
                 (StatusCode::BAD_REQUEST, "invalid signature encoding")
             }
             VerifiedUrlError::SignatureMismatch => {
                 (StatusCode::UNAUTHORIZED, "signature verification failed")
             }
-            VerifiedUrlError::TimestampTooOld => {
-                (StatusCode::UNAUTHORIZED, "signature expired")
-            }
-            VerifiedUrlError::OriginNotAllowed => {
-                (StatusCode::FORBIDDEN, "origin not allowed")
-            }
+            VerifiedUrlError::TimestampTooOld => (StatusCode::UNAUTHORIZED, "signature expired"),
+            VerifiedUrlError::OriginNotAllowed => (StatusCode::FORBIDDEN, "origin not allowed"),
         };
         (status, message).into_response()
     }
@@ -224,7 +192,6 @@ impl FromRequestParts<AppState> for VerifiedUrl {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        // 1. Parse the Ocrch-Signature header → (timestamp, signature_bytes)
         let sig_value = parts
             .headers
             .get(SIGNATURE_HEADER)
@@ -232,19 +199,8 @@ impl FromRequestParts<AppState> for VerifiedUrl {
             .to_str()
             .map_err(|_| VerifiedUrlError::InvalidHeader)?;
 
-        let dot_pos = sig_value
-            .find('.')
-            .ok_or(VerifiedUrlError::InvalidHeader)?;
+        let (timestamp, signature_bytes) = signature::parse_signature_header(sig_value)?;
 
-        let timestamp: i64 = sig_value[..dot_pos]
-            .parse()
-            .map_err(|_| VerifiedUrlError::InvalidHeader)?;
-
-        let signature_bytes = fast32::base64::RFC4648_NOPAD
-            .decode_str(&sig_value[dot_pos + 1..])
-            .map_err(|_| VerifiedUrlError::InvalidBase64)?;
-
-        // 2. Read the Ocrch-Signed-Url header
         let signed_url = parts
             .headers
             .get(SIGNED_URL_HEADER)
@@ -252,21 +208,14 @@ impl FromRequestParts<AppState> for VerifiedUrl {
             .to_str()
             .map_err(|_| VerifiedUrlError::InvalidHeader)?;
 
-        // 3. Verify HMAC: data = "{url}.{timestamp}"
-        let data = format!("{signed_url}.{timestamp}");
         let merchant = state.config.merchant.read().await;
-        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, merchant.secret_bytes());
+        signature::verify_url(
+            signed_url,
+            timestamp,
+            &signature_bytes,
+            merchant.secret_bytes(),
+        )?;
 
-        ring::hmac::verify(&key, data.as_bytes(), &signature_bytes)
-            .map_err(|_| VerifiedUrlError::SignatureMismatch)?;
-
-        // 4. Check timestamp freshness
-        let now = time::OffsetDateTime::now_utc().unix_timestamp();
-        if now - timestamp > MAX_SIGNATURE_AGE {
-            return Err(VerifiedUrlError::TimestampTooOld);
-        }
-
-        // 5. Verify the URL origin is in allowed_origins
         let parsed_url =
             url::Url::parse(signed_url).map_err(|_| VerifiedUrlError::InvalidHeader)?;
         let origin = parsed_url.origin().unicode_serialization();
