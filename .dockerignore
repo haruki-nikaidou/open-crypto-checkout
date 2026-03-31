@@ -1,0 +1,15 @@
+# Build artifacts
+target/
+
+# Documentation site (not needed for the server image)
+doc/
+
+# Git metadata
+.git/
+.gitignore
+
+# Cursor / IDE
+.cursor/
+
+# Local config (should be mounted at runtime, not baked in)
+ocrch-config.toml
