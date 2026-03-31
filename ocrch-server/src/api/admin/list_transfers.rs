@@ -47,9 +47,9 @@ pub async fn list_transfers(
                 wallet_address: address.clone(),
                 limit: fetch_limit,
                 offset: 0,
-                status: query.status.map(|s| TransferStatus::from(s)),
+                status: query.status.map(TransferStatus::from),
                 chain: erc20_chain,
-                token: query.token.map(|t| StablecoinName::from(t)),
+                token: query.token.map(StablecoinName::from),
             })
             .await
             .map_err(AdminApiError::Database)?;
@@ -79,8 +79,8 @@ pub async fn list_transfers(
                 wallet_address: address,
                 limit: fetch_limit,
                 offset: 0,
-                status: query.status.map(|s| TransferStatus::from(s)),
-                token: query.token.map(|t| StablecoinName::from(t)),
+                status: query.status.map(TransferStatus::from),
+                token: query.token.map(StablecoinName::from),
             })
             .await
             .map_err(AdminApiError::Database)?;

@@ -45,7 +45,7 @@ pub async fn list_deposits(
                 offset: 0,
                 order_id: query.order_id,
                 chain: erc20_chain,
-                token: query.token.map(|t| StablecoinName::from(t)),
+                token: query.token.map(StablecoinName::from),
             })
             .await
             .map_err(AdminApiError::Database)?;
@@ -71,7 +71,7 @@ pub async fn list_deposits(
                 limit: fetch_limit,
                 offset: 0,
                 order_id: query.order_id,
-                token: query.token.map(|t| StablecoinName::from(t)),
+                token: query.token.map(StablecoinName::from),
             })
             .await
             .map_err(AdminApiError::Database)?;
