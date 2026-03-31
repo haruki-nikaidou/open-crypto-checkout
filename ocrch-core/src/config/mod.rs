@@ -18,23 +18,18 @@ pub use merchant::MerchantConfig;
 pub use server::ServerConfig;
 pub use wallet::WalletConfig;
 
-use std::sync::Arc;
-use tokio::sync::RwLock;
-
-/// Shared configuration state with separate locks for each section.
-///
-/// This allows independent access to different configuration sections
-/// without blocking other readers/writers.
+/// Owns the config stores for each configuration section, keeping them alive
+/// for the duration of the application. Clone it cheaply to share handles.
 #[derive(Clone)]
 pub struct SharedConfig {
     /// Server configuration (listen address, etc.).
-    pub server: Arc<RwLock<ServerConfig>>,
+    pub server: ConfigStore<ServerConfig>,
     /// Admin configuration (authentication).
-    pub admin: Arc<RwLock<AdminConfig>>,
+    pub admin: ConfigStore<AdminConfig>,
     /// Merchant configurations indexed by ID.
-    pub merchant: Arc<RwLock<MerchantConfig>>,
+    pub merchant: ConfigStore<MerchantConfig>,
     /// Wallet configurations for receiving payments.
-    pub wallets: Arc<RwLock<Vec<WalletConfig>>>,
+    pub wallets: ConfigStore<Vec<WalletConfig>>,
     /// API keys for blockchain explorer services.
-    pub api_keys: Arc<RwLock<ApiKeysConfig>>,
+    pub api_keys: ConfigStore<ApiKeysConfig>,
 }

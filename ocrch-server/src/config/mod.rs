@@ -12,11 +12,10 @@ use crate::config::file::{
 use crate::config::runtime::{
     AdminConfig, ApiKeysConfig, MerchantConfig, ServerConfig, SharedConfig, WalletConfig,
 };
+use ocrch_core::config::ConfigStore;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::RwLock;
 
 /// Errors that can occur during configuration loading.
 #[derive(Debug, Error)]
@@ -50,14 +49,14 @@ pub struct LoadedConfig {
 }
 
 impl LoadedConfig {
-    /// Convert into a SharedConfig with Arc<RwLock<T>> wrappers.
+    /// Convert into a SharedConfig, wrapping each section in a ConfigStore.
     pub fn into_shared(self) -> SharedConfig {
         SharedConfig {
-            server: Arc::new(RwLock::new(self.server)),
-            admin: Arc::new(RwLock::new(self.admin)),
-            merchant: Arc::new(RwLock::new(self.merchant)),
-            wallets: Arc::new(RwLock::new(self.wallets)),
-            api_keys: Arc::new(RwLock::new(self.api_keys)),
+            server: ConfigStore::new(self.server),
+            admin: ConfigStore::new(self.admin),
+            merchant: ConfigStore::new(self.merchant),
+            wallets: ConfigStore::new(self.wallets),
+            api_keys: ConfigStore::new(self.api_keys),
         }
     }
 }

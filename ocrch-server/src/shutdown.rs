@@ -48,11 +48,11 @@ pub fn spawn_config_reload_handler(
                     match config_loader.reload() {
                         Ok(loaded_config) => {
                             // Update all config sections
-                            *state.config.server.write().await = loaded_config.server;
-                            *state.config.admin.write().await = loaded_config.admin;
-                            *state.config.merchant.write().await = loaded_config.merchant;
-                            *state.config.wallets.write().await = loaded_config.wallets.clone();
-                            *state.config.api_keys.write().await = loaded_config.api_keys;
+                            state.config.server.update(loaded_config.server).await;
+                            state.config.admin.update(loaded_config.admin).await;
+                            state.config.merchant.update(loaded_config.merchant).await;
+                            state.config.wallets.update(loaded_config.wallets.clone()).await;
+                            state.config.api_keys.update(loaded_config.api_keys).await;
 
                             // Rebuild PoolingManagerConfig from new wallets so
                             // PoolingManager can diff and reconcile tick loops.
