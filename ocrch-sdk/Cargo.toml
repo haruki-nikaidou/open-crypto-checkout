@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-client = ["dep:reqwest"]
+client = ["dep:reqwest", "dep:tokio-tungstenite", "dep:futures-util"]
 
 [dependencies]
 tokio = { workspace = true }
@@ -22,6 +22,8 @@ time = { workspace = true }
 url = { workspace = true }
 ring = { workspace = true }
 reqwest = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
 
 # Security
 argon2 = "0.5"

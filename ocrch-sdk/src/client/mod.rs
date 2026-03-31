@@ -7,22 +7,28 @@ mod admin;
 mod service;
 mod user;
 mod webhook;
+mod ws;
 
 pub use admin::AdminClient;
 pub use service::ServiceClient;
 pub use user::UserClient;
 pub use webhook::verify_webhook;
+pub use ws::OrderStatusStream;
 
 use reqwest::StatusCode;
 
 use crate::signature::SignatureError;
 
-/// Errors produced by the SDK HTTP clients.
+/// Errors produced by the SDK HTTP and WebSocket clients.
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     /// Transport-level failure (DNS, TLS, connection reset, …).
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
+
+    /// WebSocket transport error.
+    #[error("websocket error: {0}")]
+    Ws(#[from] tokio_tungstenite::tungstenite::Error),
 
     /// HMAC signature could not be computed or verified.
     #[error("signature error: {0}")]

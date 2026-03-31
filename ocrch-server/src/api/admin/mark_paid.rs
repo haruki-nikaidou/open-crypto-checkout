@@ -51,10 +51,7 @@ pub async fn mark_paid(
         .await
         .map_err(|_| AdminApiError::EventChannelClosed)?;
 
-    let _ = state.order_status_tx.send(OrderStatusUpdate {
-        order_id,
-        new_status: OrderStatus::Paid,
-    });
+    let _ = state.order_status_tx.send(OrderStatusUpdate { order_id });
 
     let updated = processor
         .process(GetOrderRecordById { order_id })

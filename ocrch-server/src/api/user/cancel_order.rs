@@ -62,10 +62,7 @@ pub(super) async fn cancel_order(
         tracing::error!(error = %e, "Failed to emit OrderStatusChanged webhook event");
     }
 
-    let _ = state.order_status_tx.send(OrderStatusUpdate {
-        order_id,
-        new_status: OrderStatus::Cancelled,
-    });
+    let _ = state.order_status_tx.send(OrderStatusUpdate { order_id });
 
     let updated = processor
         .process(GetOrderRecordById { order_id })

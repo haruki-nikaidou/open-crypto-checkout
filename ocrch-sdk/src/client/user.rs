@@ -9,7 +9,7 @@ use reqwest::Client;
 use url::Url;
 use uuid::Uuid;
 
-use super::ClientError;
+use super::{ClientError, OrderStatusStream};
 use crate::objects::create_payment::OrderResponse;
 use crate::objects::user::{ChainCoinPair, PaymentDetail, SelectPaymentMethod};
 use crate::signature::{SIGNATURE_HEADER, SIGNED_URL_HEADER, sign_url};
@@ -124,6 +124,50 @@ impl UserClient {
             .await?;
 
         parse_response(resp).await
+    }
+
+    /// `GET /api/v1/user/orders/{order_id}/ws` – open a WebSocket connection
+    /// that streams live order status updates.
+    ///
+    /// The returned [`OrderStatusStream`] yields one [`WsServerMessage`] per
+    /// server frame.  The server closes the stream after delivering a terminal
+    /// status (`Paid`, `Expired`, or `Cancelled`).
+    ///
+    /// [`WsServerMessage`]: crate::objects::ws::WsServerMessage
+    pub async fn connect_order_status(
+        &self,
+        order_id: Uuid,
+    ) -> Result<OrderStatusStream, ClientError> {
+        let (sig, signed_url) = self.sign_headers();
+
+        // Derive a WebSocket URL from the HTTP base URL by swapping the scheme.
+        let http_url = self
+            .base_url
+            .join(&format!("/api/v1/user/orders/{order_id}/ws"))?;
+
+        let ws_scheme = match http_url.scheme() {
+            "https" => "wss",
+            _ => "ws",
+        };
+
+        // Rebuild the URL with the correct WS scheme, preserving host and port.
+        let ws_url = {
+            let mut u = http_url.clone();
+            // `url::Url::set_scheme` is infallible for known schemes.
+            let _ = u.set_scheme(ws_scheme);
+            u
+        };
+
+        let request = tokio_tungstenite::tungstenite::http::Request::builder()
+            .uri(ws_url.as_str())
+            .header(SIGNATURE_HEADER, sig.as_str())
+            .header(SIGNED_URL_HEADER, signed_url)
+            .body(())
+            .map_err(tokio_tungstenite::tungstenite::Error::HttpFormat)
+            .map_err(ClientError::Ws)?;
+
+        let (ws_stream, _) = tokio_tungstenite::connect_async(request).await?;
+        Ok(OrderStatusStream::new(ws_stream))
     }
 
     /// `GET /api/v1/user/orders/{order_id}/status` – poll the current order
