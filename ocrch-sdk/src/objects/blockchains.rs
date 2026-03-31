@@ -1,22 +1,32 @@
+//! Supported blockchains and stablecoins with their on-chain contract addresses.
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 /// All blockchains supported by Ocrch
 pub enum Blockchain {
+    /// Ethereum mainnet.
     #[serde(rename = "eth")]
     Ethereum,
+    /// Polygon (MATIC) mainnet.
     #[serde(rename = "polygon")]
     Polygon,
+    /// Base mainnet (Coinbase L2).
     #[serde(rename = "base")]
     Base,
+    /// Arbitrum One mainnet.
     #[serde(rename = "arb")]
     ArbitrumOne,
+    /// Linea mainnet (ConsenSys L2).
     #[serde(rename = "linea")]
     Linea,
+    /// Optimism mainnet.
     #[serde(rename = "op")]
     Optimism,
+    /// Avalanche C-Chain.
     #[serde(rename = "avaxc")]
     AvalancheC,
+    /// Tron mainnet.
     #[serde(rename = "tron")]
     Tron,
 }
@@ -25,12 +35,16 @@ pub enum Blockchain {
 /// All stablecoins supported by Ocrch
 #[serde(rename_all = "UPPERCASE")]
 pub enum Stablecoin {
+    /// USD Coin (USDC).
     Usdc,
+    /// Tether (USDT).
     Usdt,
+    /// Dai (DAI).
     Dai,
 }
 
 impl Stablecoin {
+    /// Return the static [`StablecoinData`] record for this coin.
     pub fn get_data(&self) -> StablecoinData {
         match self {
             Stablecoin::Usdc => USDC,
@@ -40,13 +54,19 @@ impl Stablecoin {
     }
 }
 
+/// Static metadata for a supported stablecoin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct StablecoinData {
+    /// The stablecoin identifier.
     pub name: Stablecoin,
+    /// Contract addresses on each supported blockchain, as `(chain, address)` pairs.
     pub contract_addresses: &'static [(Blockchain, &'static str)],
 }
 
 impl StablecoinData {
+    /// Look up the contract address for `on_chain`.
+    ///
+    /// Returns `None` if this stablecoin is not deployed on the requested chain.
     pub fn get_contract_address(&self, on_chain: Blockchain) -> Option<&'static str> {
         self.contract_addresses
             .iter()
@@ -55,6 +75,7 @@ impl StablecoinData {
     }
 }
 
+/// Static USDT contract-address table.
 pub const USDT: StablecoinData = StablecoinData {
     name: Stablecoin::Usdt,
     contract_addresses: &[
@@ -70,6 +91,7 @@ pub const USDT: StablecoinData = StablecoinData {
     ],
 };
 
+/// Static USDC contract-address table.
 pub const USDC: StablecoinData = StablecoinData {
     name: Stablecoin::Usdc,
     contract_addresses: &[
@@ -104,6 +126,7 @@ pub const USDC: StablecoinData = StablecoinData {
     ],
 };
 
+/// Static DAI contract-address table.
 pub const DAI: StablecoinData = StablecoinData {
     name: Stablecoin::Dai,
     contract_addresses: &[

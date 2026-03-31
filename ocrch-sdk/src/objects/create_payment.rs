@@ -1,3 +1,5 @@
+//! Order creation and status types used by the Service API.
+
 use crate::objects::blockchains;
 use crate::objects::webhook::OrderStatus;
 use crate::signature::Signature;
@@ -9,11 +11,17 @@ use uuid::Uuid;
 /// Sent by the application backend to the Service API.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PaymentCreatingEssential {
+    /// Payment amount in the selected stablecoin.
     pub amount: rust_decimal::Decimal,
+    /// Optional wallet address to restrict which address the user must pay from.
     pub expecting_wallet_address: Option<String>,
+    /// Merchant-assigned order identifier (opaque string).
     pub order_id: String,
+    /// Pre-selected blockchain, or `None` to let the user choose.
     pub blockchain: Option<blockchains::Blockchain>,
+    /// Pre-selected stablecoin, or `None` to let the user choose.
     pub stablecoin: Option<blockchains::Stablecoin>,
+    /// URL that the Ocrch server will POST webhook events to.
     pub webhook_url: String,
 }
 
@@ -24,6 +32,7 @@ impl Signature for PaymentCreatingEssential {}
 /// Sent by the application backend to the Service API.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct GetOrderRequest {
+    /// Internal Ocrch order ID returned when the order was created.
     pub order_id: Uuid,
 }
 

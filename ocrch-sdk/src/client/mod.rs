@@ -30,7 +30,12 @@ pub enum ClientError {
 
     /// The server returned a non-2xx status code.
     #[error("api error: status {status}, body: {body}")]
-    Api { status: StatusCode, body: String },
+    Api {
+        /// HTTP status code returned by the server.
+        status: StatusCode,
+        /// Response body text.
+        body: String,
+    },
 
     /// Response body could not be deserialized.
     #[error("json error: {0}")]

@@ -14,7 +14,9 @@ use super::blockchains::{Blockchain, Stablecoin};
 /// This triggers creation of a new pending deposit for the order.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SelectPaymentMethod {
+    /// The blockchain to pay on.
     pub blockchain: Blockchain,
+    /// The stablecoin to pay with.
     pub stablecoin: Stablecoin,
 }
 
@@ -24,8 +26,11 @@ pub struct SelectPaymentMethod {
 /// payment options are available.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainCoinPair {
+    /// Blockchain for this payment option.
     pub blockchain: Blockchain,
+    /// Stablecoin for this payment option.
     pub stablecoin: Stablecoin,
+    /// Wallet address the user should send funds to.
     pub wallet_address: String,
 }
 
@@ -35,9 +40,14 @@ pub struct ChainCoinPair {
 /// along with the expected amount and selected chain/coin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentDetail {
+    /// Internal order ID.
     pub order_id: Uuid,
+    /// Wallet address the user must send funds to.
     pub wallet_address: String,
+    /// Exact amount the user must send.
     pub amount: rust_decimal::Decimal,
+    /// Blockchain on which the payment is expected.
     pub blockchain: Blockchain,
+    /// Stablecoin the payment must be made in.
     pub stablecoin: Stablecoin,
 }

@@ -34,14 +34,19 @@ pub trait Signature: for<'de> serde::Deserialize<'de> + serde::Serialize {}
 /// Errors produced by signature operations.
 #[derive(Debug, thiserror::Error)]
 pub enum SignatureError {
+    /// The `Ocrch-Signature` header did not match the expected `{ts}.{b64}` format.
     #[error("invalid header format")]
     InvalidFormat,
+    /// The base64 segment of the signature header could not be decoded.
     #[error("invalid base64 encoding")]
     InvalidBase64,
+    /// The JSON body could not be serialized or deserialized.
     #[error("invalid json: {0}")]
     Json(#[from] serde_json::Error),
+    /// The computed HMAC did not match the provided signature.
     #[error("invalid signature")]
     SignatureMismatch,
+    /// The signature timestamp is older than [`MAX_SIGNATURE_AGE`].
     #[error("signature expired")]
     Expired,
 }
@@ -60,9 +65,13 @@ impl From<ring::error::Unspecified> for SignatureError {
 /// HMAC-SHA256 signature.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignedObject<T: Signature> {
+    /// Deserialized payload.
     pub body: T,
+    /// Unix timestamp embedded in the signature header.
     pub timestamp: i64,
+    /// Raw JSON string of the body (used for HMAC verification).
     pub json: String,
+    /// Raw HMAC-SHA256 bytes.
     pub signature: Box<[u8]>,
 }
 
