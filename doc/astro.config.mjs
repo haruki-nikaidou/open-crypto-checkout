@@ -6,19 +6,33 @@ import starlight from '@astrojs/starlight';
 export default defineConfig({
 	integrations: [
 		starlight({
-			title: 'My Docs',
-			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/withastro/starlight' }],
+			title: 'Open Crypto Checkout',
+			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/haruki-nikaidou/open-crypto-checkout' }],
 			sidebar: [
 				{
-					label: 'Guides',
+					label: 'Quick Start',
 					items: [
-						// Each item here is one entry in the navigation menu.
-						{ label: 'Example Guide', slug: 'guides/example' },
+						{ label: 'Introduction', slug: 'quick-start/introduction' },
+						{ label: 'Deploy with Docker', slug: 'quick-start/docker' },
 					],
 				},
 				{
-					label: 'Reference',
-					autogenerate: { directory: 'reference' },
+					label: 'Guides',
+					items: [
+						{ label: 'Configuration', slug: 'guides/configuration' },
+						{ label: 'Deploy with systemd', slug: 'guides/deploy-systemd' },
+						{ label: 'Frontend Development', slug: 'guides/frontend' },
+						{ label: 'Webhooks', slug: 'guides/webhooks' },
+					],
+				},
+				{
+					label: 'API Reference',
+					items: [
+						{ label: 'Authentication', slug: 'reference/authentication' },
+						{ label: 'Service API', slug: 'reference/service-api' },
+						{ label: 'User API', slug: 'reference/user-api' },
+						{ label: 'Admin API', slug: 'reference/admin-api' },
+					],
 				},
 			],
 		}),

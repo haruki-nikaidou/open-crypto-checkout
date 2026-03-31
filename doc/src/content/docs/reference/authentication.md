@@ -1,0 +1,160 @@
+---
+title: Authentication
+description: How to authenticate requests to each Ocrch API surface.
+sidebar:
+  order: 1
+---
+
+Ocrch uses three distinct authentication mechanisms, one per API surface. All cryptographic work uses standard HMAC-SHA256 and standard HTTP headers.
+
+---
+
+## Service API — Signed JSON Body
+
+Used by: **Service API** (your application backend → Ocrch)  
+Header: `Ocrch-Signature`
+
+### Algorithm
+
+```
+message   = "{unix_timestamp}.{raw_json_body}"
+signature = Base64( HMAC-SHA256( message, merchant_secret ) )
+header    = "{unix_timestamp}.{signature}"
+```
+
+### Steps
+
+1. Serialize your request payload to a JSON string.
+2. Get the current Unix timestamp (seconds since epoch) as a string.
+3. Concatenate: `message = timestamp + "." + json_body`.
+4. Compute `HMAC-SHA256(message, merchant_secret)` and Base64-encode the result.
+5. Set the header: `Ocrch-Signature: {timestamp}.{base64_hmac}`.
+
+### Example (TypeScript)
+
+```ts
+import { createHmac } from "node:crypto";
+
+function signBody(body: object, secret: string): string {
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const json = JSON.stringify(body);
+  const message = `${timestamp}.${json}`;
+  const sig = createHmac("sha256", secret).update(message).digest("base64");
+  return `${timestamp}.${sig}`;
+}
+
+const payload = { order_id: "ord_123", amount: "19.99", webhook_url: "https://..." };
+const signature = signBody(payload, process.env.MERCHANT_SECRET!);
+
+fetch("https://checkout-api.example.com/api/v1/service/orders", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "Ocrch-Signature": signature,
+  },
+  body: JSON.stringify(payload),
+});
+```
+
+### Example (Python)
+
+```python
+import hmac, hashlib, base64, json, time
+
+def sign_body(body: dict, secret: str) -> str:
+    timestamp = str(int(time.time()))
+    json_body = json.dumps(body, separators=(",", ":"))
+    message = f"{timestamp}.{json_body}"
+    sig = base64.b64encode(
+        hmac.new(secret.encode(), message.encode(), hashlib.sha256).digest()
+    ).decode()
+    return f"{timestamp}.{sig}"
+```
+
+---
+
+## User API — Signed URL
+
+Used by: **User API** (checkout frontend browser → Ocrch)  
+Headers: `Ocrch-Signed-Url` + `Ocrch-Signature`
+
+The signed URL mechanism lets your backend pre-authorize the checkout frontend without exposing the merchant secret to the browser.
+
+### Algorithm
+
+```
+message        = "{full_checkout_url}.{unix_timestamp}"
+signature      = Base64( HMAC-SHA256( message, merchant_secret ) )
+Ocrch-Signed-Url: {full_checkout_url}
+Ocrch-Signature:  {unix_timestamp}.{signature}
+```
+
+### Steps (done on your application backend)
+
+1. Determine the full checkout URL — including all query parameters, but **excluding** the signature itself.
+2. Get the current Unix timestamp.
+3. Concatenate: `message = url + "." + timestamp`.
+4. Compute `HMAC-SHA256(message, merchant_secret)` and Base64-encode it.
+5. Pass `url` and `{timestamp}.{base64_hmac}` to your frontend (e.g. embed in the redirect or return from an API call).
+
+### Steps (done on the checkout frontend for each API call)
+
+Set both headers on every User API request:
+
+```
+Ocrch-Signed-Url: https://checkout.example.com/pay?order_id=...
+Ocrch-Signature:  1711900800.base64EncodedHmac
+```
+
+### Origin Verification
+
+In addition to the HMAC, Ocrch extracts the **origin** of the URL in `Ocrch-Signed-Url` and checks it against `merchant.allowed_origins` in the config. Requests from unauthorized origins are rejected with `403 Forbidden`.
+
+### Signature Expiry
+
+Ocrch rejects signatures with a timestamp too far in the past. For long checkout sessions, your backend should provide a mechanism to refresh the signature when the frontend receives `401 Unauthorized` with body `signature expired`.
+
+### Example (TypeScript — backend sign)
+
+```ts
+import { createHmac } from "node:crypto";
+
+function signCheckoutUrl(url: string, secret: string): { signedUrl: string; signature: string } {
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const message = `${url}.${timestamp}`;
+  const sig = createHmac("sha256", secret).update(message).digest("base64");
+  return { signedUrl: url, signature: `${timestamp}.${sig}` };
+}
+```
+
+---
+
+## Admin API — Plaintext Secret Header
+
+Used by: **Admin API** (admin dashboard → Ocrch)  
+Header: `Ocrch-Admin-Authorization`
+
+The admin secret is sent as a plaintext string. Ocrch compares it against an Argon2 hash stored in the config file.
+
+```
+Ocrch-Admin-Authorization: your-admin-secret
+```
+
+<Aside type="caution">
+Always access the Admin API over HTTPS. The secret is transmitted in plaintext and must be protected by TLS in transit.
+</Aside>
+
+---
+
+## Error Responses
+
+| Status | Body | Cause |
+|--------|------|-------|
+| `401 Unauthorized` | `missing Ocrch-Signature header` | Header absent |
+| `400 Bad Request` | `invalid Ocrch-Signature header format` | Header malformed |
+| `400 Bad Request` | `invalid signature encoding` | Base64 decode failed |
+| `401 Unauthorized` | `signature verification failed` | HMAC mismatch or expired |
+| `400 Bad Request` | `missing Ocrch-Signed-Url header` | URL header absent (User API) |
+| `403 Forbidden` | `origin not allowed` | URL origin not in `allowed_origins` |
+| `401 Unauthorized` | `missing Ocrch-Admin-Authorization header` | Admin header absent |
+| `401 Unauthorized` | `invalid admin secret` | Admin secret mismatch |

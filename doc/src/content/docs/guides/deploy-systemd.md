@@ -1,0 +1,357 @@
+---
+title: Deploy with systemd
+description: Compile Open Crypto Checkout from source and run it as a systemd service on Linux.
+sidebar:
+  order: 4
+---
+
+This guide walks through compiling Ocrch from source on a Linux server and running it as a managed `systemd` service. No prior Rust experience is required.
+
+## Prerequisites
+
+- A Linux server running a systemd-based distribution (Ubuntu 22.04+, Debian 12+, Fedora 40+, etc.)
+- `sudo` / root access
+- PostgreSQL 14+ running and accessible (local or remote)
+- Git installed (`sudo apt install git` or equivalent)
+
+---
+
+## Step 1 — Install Rust
+
+Rust is installed with the official `rustup` toolchain manager. This installs the compiler (`rustc`) and the build tool (`cargo`) into your home directory without needing root.
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Follow the on-screen prompts and choose the default installation (`1`). When it finishes, load the new environment variables into your current shell:
+
+```bash
+source "$HOME/.cargo/env"
+```
+
+Verify the installation:
+
+```bash
+rustc --version   # e.g. rustc 1.87.0
+cargo --version   # e.g. cargo 1.87.0
+```
+
+<Aside type="note">
+Rust compiles quickly on modern hardware but the first build downloads and compiles all dependencies, which can take **5–15 minutes** depending on your server's CPU and network speed. Subsequent builds are much faster because dependencies are cached.
+</Aside>
+
+---
+
+## Step 2 — Install System Dependencies
+
+The build requires a C linker and OpenSSL headers.
+
+<Tabs>
+<TabItem label="Ubuntu / Debian">
+```bash
+sudo apt update
+sudo apt install -y build-essential pkg-config libssl-dev
+```
+</TabItem>
+<TabItem label="Fedora / RHEL">
+```bash
+sudo dnf install -y gcc pkg-config openssl-devel
+```
+</TabItem>
+<TabItem label="Arch Linux">
+```bash
+sudo pacman -S --needed base-devel openssl pkg-config
+```
+</TabItem>
+</Tabs>
+
+---
+
+## Step 3 — Clone the Repository
+
+```bash
+git clone https://github.com/haruki-nikaidou/open-crypto-checkout.git
+cd open-crypto-checkout
+```
+
+---
+
+## Step 4 — Build the Binary
+
+Use `cargo build --release` to compile an optimised release binary. The `--bin` flag tells Cargo to build only the server binary (not the SDK or core library separately).
+
+```bash
+cargo build --release --bin ocrch-server
+```
+
+This produces the binary at:
+
+```
+target/release/ocrch-server
+```
+
+The binary is statically linked where possible and has no runtime Rust dependencies. Copy it to a system-wide location:
+
+```bash
+sudo cp target/release/ocrch-server /usr/local/bin/ocrch-server
+sudo chmod +x /usr/local/bin/ocrch-server
+```
+
+---
+
+## Step 5 — Create a Dedicated System User
+
+Running the server as a dedicated unprivileged user limits the blast radius if anything goes wrong.
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin ocrch
+```
+
+---
+
+## Step 6 — Set Up the Config Directory
+
+```bash
+sudo mkdir -p /etc/ocrch
+sudo cp ocrch-config.example.toml /etc/ocrch/ocrch-config.toml
+sudo chown -R ocrch:ocrch /etc/ocrch
+sudo chmod 640 /etc/ocrch/ocrch-config.toml
+```
+
+Now edit the config file:
+
+```bash
+sudo nano /etc/ocrch/ocrch-config.toml
+```
+
+At minimum you must fill in:
+
+- `admin.secret` — a strong admin password (the server will Argon2-hash it on first run)
+- `merchant.secret` — your HMAC signing key
+- `merchant.allowed_origins` — your checkout frontend URL(s)
+- `[[wallets]]` — your wallet addresses
+- `[api_keys]` — your Etherscan and/or Tronscan API keys
+
+See the [Configuration guide](/guides/configuration/) for the full reference.
+
+---
+
+## Step 7 — Set Up the Database
+
+Run migrations before starting the service for the first time. The `--migrate` flag tells the server to apply all pending database migrations and then exit if no other work is needed — but when used with `--listen` it applies migrations then starts normally. The simplest approach is a one-off migrate run:
+
+```bash
+DATABASE_URL="postgres://user:pass@localhost/ocrch" \
+  ocrch-server -c /etc/ocrch/ocrch-config.toml --migrate
+```
+
+The server will apply the migrations, then start listening. Stop it with `Ctrl+C` once it prints a "listening" log line — the database is now set up.
+
+<Aside type="tip">
+After the first run, the server will have rewritten `/etc/ocrch/ocrch-config.toml` to replace your plaintext `admin.secret` with an Argon2 hash. This is expected.
+</Aside>
+
+---
+
+## Step 8 — Create the systemd Unit File
+
+Create a service unit at `/etc/systemd/system/ocrch.service`:
+
+```bash
+sudo nano /etc/systemd/system/ocrch.service
+```
+
+Paste the following, adjusting `DATABASE_URL` for your PostgreSQL setup:
+
+```ini
+[Unit]
+Description=Open Crypto Checkout Server
+Documentation=https://github.com/haruki-nikaidou/open-crypto-checkout
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ocrch
+Group=ocrch
+
+# Database connection string — keep this secret
+Environment="DATABASE_URL=postgres://ocrch:yourpassword@localhost:5432/ocrch"
+# Adjust log level as needed: error | warn | info | debug | trace
+Environment="RUST_LOG=info,sqlx=warn"
+
+ExecStart=/usr/local/bin/ocrch-server \
+  --config /etc/ocrch/ocrch-config.toml \
+  --listen 127.0.0.1:8080 \
+  --migrate
+
+Restart=on-failure
+RestartSec=5s
+
+# Harden the service
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/etc/ocrch
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Key points:
+
+- `--listen 127.0.0.1:8080` binds only to localhost. A reverse proxy (Nginx, Caddy) should handle public HTTPS traffic.
+- `--migrate` is included so the service automatically applies any new database migrations on upgrade.
+- `ReadWritePaths=/etc/ocrch` is required because the server rewrites the config file when it first hashes the admin secret.
+
+---
+
+## Step 9 — Enable and Start the Service
+
+```bash
+# Reload systemd so it picks up the new unit file
+sudo systemctl daemon-reload
+
+# Enable the service to start on boot
+sudo systemctl enable ocrch
+
+# Start it now
+sudo systemctl start ocrch
+```
+
+Check that it is running:
+
+```bash
+sudo systemctl status ocrch
+```
+
+You should see `Active: active (running)`. View live logs:
+
+```bash
+sudo journalctl -u ocrch -f
+```
+
+Verify the health endpoint:
+
+```bash
+curl http://127.0.0.1:8080/health
+# {"status":"ok","version":"0.1.0"}
+```
+
+---
+
+## Step 10 — Set Up a Reverse Proxy
+
+The server listens on `127.0.0.1:8080` and does not handle TLS. Use a reverse proxy to expose it over HTTPS.
+
+<Tabs>
+<TabItem label="Caddy">
+Install Caddy and add to `/etc/caddy/Caddyfile`:
+
+```
+checkout-api.example.com {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+Caddy handles TLS certificates automatically. Restart: `sudo systemctl reload caddy`.
+</TabItem>
+<TabItem label="Nginx">
+```nginx
+server {
+    listen 443 ssl;
+    server_name checkout-api.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/checkout-api.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/checkout-api.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        # Required for WebSocket support on /api/v1/user/orders/{id}/ws
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+Restart: `sudo systemctl reload nginx`.
+</TabItem>
+</Tabs>
+
+---
+
+## Upgrading
+
+To upgrade to a new version:
+
+<Steps>
+
+1. **Pull the latest code**
+
+   ```bash
+   cd open-crypto-checkout
+   git pull
+   ```
+
+2. **Rebuild the binary**
+
+   ```bash
+   cargo build --release --bin ocrch-server
+   ```
+
+3. **Replace the binary and restart**
+
+   ```bash
+   sudo systemctl stop ocrch
+   sudo cp target/release/ocrch-server /usr/local/bin/ocrch-server
+   sudo systemctl start ocrch
+   ```
+
+   The `--migrate` flag in the unit file means any new database migrations are applied automatically on startup.
+
+</Steps>
+
+---
+
+## Useful Service Commands
+
+| Command | Description |
+|---------|-------------|
+| `sudo systemctl start ocrch` | Start the service |
+| `sudo systemctl stop ocrch` | Stop the service |
+| `sudo systemctl restart ocrch` | Restart the service |
+| `sudo systemctl status ocrch` | Show current status |
+| `sudo systemctl enable ocrch` | Start automatically on boot |
+| `sudo systemctl disable ocrch` | Remove from boot |
+| `sudo journalctl -u ocrch -f` | Follow live logs |
+| `sudo journalctl -u ocrch --since "1 hour ago"` | Show recent logs |
+| `sudo kill -HUP $(systemctl show -p MainPID --value ocrch)` | Hot-reload config |
+
+---
+
+## Troubleshooting
+
+**Service fails to start — "could not connect to database"**
+
+Check that `DATABASE_URL` in the unit file is correct and that PostgreSQL is reachable from the server:
+
+```bash
+psql "postgres://ocrch:yourpassword@localhost:5432/ocrch" -c "SELECT 1;"
+```
+
+**Service fails to start — "No such file or directory"**
+
+Verify the binary path: `which ocrch-server` or `ls -l /usr/local/bin/ocrch-server`.
+
+**Config changes are not taking effect**
+
+Send `SIGHUP` to hot-reload without restarting (see table above), or run `sudo systemctl restart ocrch` for a full restart.
+
+**Build fails with "linker 'cc' not found"**
+
+You are missing build-essential / gcc. Re-run the Step 2 system dependency install for your distro.

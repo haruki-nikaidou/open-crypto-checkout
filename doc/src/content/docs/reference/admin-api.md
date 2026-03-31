@@ -1,0 +1,288 @@
+---
+title: Admin API
+description: API reference for the Admin API — operational endpoints for managing orders, deposits, transfers, and wallets.
+sidebar:
+  order: 4
+---
+
+The Admin API provides operational endpoints for monitoring and managing the payment system. It is intended for use by an admin dashboard or operations tooling.
+
+**Base path:** `/api/v1/admin`  
+**Authentication:** `Ocrch-Admin-Authorization: {admin_secret}` header
+
+<Aside type="caution">
+The admin secret is transmitted in plaintext. Always access the Admin API over HTTPS.
+</Aside>
+
+All list endpoints support pagination with `limit` (default 20, max 200) and `offset` (default 0, max 100,000) query parameters.
+
+---
+
+## Orders
+
+### `GET /orders`
+
+List orders with optional filters.
+
+**Query parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `limit` | integer | 20 | Maximum results to return (max 200). |
+| `offset` | integer | 0 | Results to skip for pagination. |
+| `status` | string | — | Filter by order status: `pending`, `paid`, `expired`, `cancelled`. |
+| `merchant_order_id` | string | — | Filter by your merchant order ID (exact match). |
+
+**Response — `200 OK`:**
+
+```json
+[
+  {
+    "order_id": "550e8400-e29b-41d4-a716-446655440000",
+    "merchant_order_id": "your-order-123",
+    "amount": "19.99",
+    "status": "paid",
+    "created_at": 1711900800,
+    "webhook_url": "https://your-app.example.com/webhooks/ocrch",
+    "webhook_retry_count": 0,
+    "webhook_success_at": 1711901000,
+    "webhook_last_tried_at": 1711900900
+  }
+]
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `order_id` | UUID string | Internal order ID |
+| `merchant_order_id` | string | Your merchant order identifier |
+| `amount` | decimal string | Payment amount |
+| `status` | string | Current order status |
+| `created_at` | integer | Unix timestamp of creation |
+| `webhook_url` | string | Configured webhook URL for this order |
+| `webhook_retry_count` | integer | Number of webhook delivery attempts |
+| `webhook_success_at` | integer \| null | Unix timestamp of first successful delivery |
+| `webhook_last_tried_at` | integer \| null | Unix timestamp of most recent attempt |
+
+---
+
+### `POST /orders/{order_id}/mark-paid`
+
+Force-mark an order as paid, bypassing on-chain verification. Use with caution — intended for manual reconciliation.
+
+**Path parameter:** `order_id` — the Ocrch order UUID.
+
+**No request body.**
+
+**Response — `200 OK`** on success.
+
+**Error responses:**
+
+| Status | Body | Cause |
+|--------|------|-------|
+| `404 Not Found` | `resource not found` | Order does not exist |
+
+---
+
+### `POST /orders/{order_id}/resend-webhook`
+
+Manually trigger a webhook delivery for an order. Useful when the initial delivery failed and the retry schedule has been exhausted.
+
+**Path parameter:** `order_id` — the Ocrch order UUID.
+
+**No request body.**
+
+**Response — `200 OK`** on success.
+
+**Error responses:**
+
+| Status | Body | Cause |
+|--------|------|-------|
+| `404 Not Found` | `resource not found` | Order does not exist |
+| `500 Internal Server Error` | `internal server error` | Event channel error |
+
+---
+
+## Pending Deposits
+
+### `GET /deposits`
+
+List pending deposits with optional filters. A pending deposit represents an unconfirmed payment the system is watching for.
+
+**Query parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `limit` | integer | 20 | Maximum results to return (max 200). |
+| `offset` | integer | 0 | Results to skip for pagination. |
+| `order_id` | UUID string | — | Filter by order ID. |
+| `blockchain` | string | — | Filter by chain (e.g. `"eth"`). |
+| `token` | string | — | Filter by stablecoin (e.g. `"USDT"`). |
+
+**Response — `200 OK`:**
+
+```json
+[
+  {
+    "id": 42,
+    "order_id": "550e8400-e29b-41d4-a716-446655440000",
+    "blockchain": "eth",
+    "token": "USDT",
+    "user_address": null,
+    "wallet_address": "0xYourEthereumWalletAddress",
+    "value": "19.99",
+    "started_at": 1711900800,
+    "last_scanned_at": 1711900860
+  }
+]
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | integer | Internal deposit ID |
+| `order_id` | UUID string | Associated order |
+| `blockchain` | string | Chain being watched |
+| `token` | string | Stablecoin expected |
+| `user_address` | string \| null | Expected sender address, if restricted |
+| `wallet_address` | string | Receiving wallet address |
+| `value` | decimal string | Expected payment amount |
+| `started_at` | integer | Unix timestamp when scanning started |
+| `last_scanned_at` | integer | Unix timestamp of most recent blockchain scan |
+
+---
+
+## Transfers
+
+### `GET /wallets/{address}/transfers`
+
+List all transfers observed for a specific wallet address.
+
+**Path parameter:** `address` — the wallet address (as configured in `ocrch-config.toml`).
+
+**Query parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `limit` | integer | 20 | Maximum results to return (max 200). |
+| `offset` | integer | 0 | Results to skip for pagination. |
+| `status` | string | — | Filter by transfer status (see below). |
+| `blockchain` | string | — | Filter by chain. |
+| `token` | string | — | Filter by stablecoin. |
+
+**Transfer status values:**
+
+| Value | Meaning |
+|-------|---------|
+| `waiting_for_confirmation` | Detected on-chain; not yet confirmed |
+| `failed_to_confirm` | Could not reach required confirmation depth |
+| `waiting_for_match` | Confirmed; not yet matched to a deposit |
+| `no_matched_deposit` | Confirmed; no matching deposit found |
+| `matched` | Confirmed and matched to a pending deposit |
+
+**Response — `200 OK`:**
+
+```json
+[
+  {
+    "id": 123,
+    "blockchain": "eth",
+    "token": "USDT",
+    "from_address": "0xSenderAddress",
+    "to_address": "0xYourEthereumWalletAddress",
+    "txn_hash": "0xabc123...",
+    "value": "19.99",
+    "block_number": 19000000,
+    "block_timestamp": 1711900700,
+    "blockchain_confirmed": true,
+    "created_at": 1711900750,
+    "status": "matched",
+    "fulfillment_id": 7
+  }
+]
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | integer | Internal transfer ID |
+| `blockchain` | string | Chain |
+| `token` | string | Stablecoin |
+| `from_address` | string | Sender address |
+| `to_address` | string | Recipient address (your wallet) |
+| `txn_hash` | string | Transaction hash |
+| `value` | decimal string | Transfer amount |
+| `block_number` | integer | Block containing the transaction |
+| `block_timestamp` | integer | Unix timestamp of the block |
+| `blockchain_confirmed` | boolean | Whether required confirmations were reached |
+| `created_at` | integer | Unix timestamp when this record was created |
+| `status` | string | Current transfer status |
+| `fulfillment_id` | integer \| null | ID of the fulfillment record if matched |
+
+---
+
+### `POST /transfers/{transfer_id}/resend-webhook`
+
+Manually trigger delivery of the unknown-transfer webhook for a specific transfer.
+
+**Path parameter:** `transfer_id` — the internal transfer ID.
+
+**No request body.**
+
+**Response — `200 OK`** on success.
+
+---
+
+## Wallets
+
+### `GET /wallets`
+
+Return all configured wallets and their enabled stablecoins, as defined in `ocrch-config.toml`.
+
+**No query parameters. No request body.**
+
+**Response — `200 OK`:**
+
+```json
+[
+  {
+    "blockchain": "eth",
+    "address": "0xYourEthereumWalletAddress",
+    "enabled_coins": ["USDT", "USDC"]
+  },
+  {
+    "blockchain": "tron",
+    "address": "TYourTronWalletAddress",
+    "enabled_coins": ["USDT"]
+  }
+]
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `blockchain` | string | Chain identifier |
+| `address` | string | Wallet address |
+| `enabled_coins` | array of strings | Stablecoins enabled for this wallet |
+
+---
+
+## Health Check
+
+### `GET /health`
+
+General health check endpoint. No authentication required.
+
+**Response — `200 OK`:**
+
+```json
+{"status": "ok", "version": "0.1.0"}
+```
+
+---
+
+## Common Error Responses
+
+| Status | Body | Cause |
+|--------|------|-------|
+| `401 Unauthorized` | `missing Ocrch-Admin-Authorization header` | Header absent |
+| `400 Bad Request` | `invalid authorization header` | Header not valid UTF-8 |
+| `401 Unauthorized` | `invalid admin secret` | Secret mismatch |
+| `404 Not Found` | `resource not found` | Requested resource does not exist |
+| `500 Internal Server Error` | `internal server error` | Database or internal error |

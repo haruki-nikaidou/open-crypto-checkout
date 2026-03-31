@@ -1,0 +1,186 @@
+---
+title: Configuration
+description: Complete reference for the ocrch-config.toml file and environment variables.
+sidebar:
+  order: 1
+---
+
+Ocrch is configured through two sources:
+
+1. **Environment variable** — `DATABASE_URL` for the PostgreSQL connection string.
+2. **TOML config file** — everything else (default path: `./ocrch-config.toml`).
+
+The config file path can be changed with the `-c` CLI flag. The server supports live config reload without restart via `SIGHUP`.
+
+## Full Example
+
+```toml
+[server]
+listen = "0.0.0.0:8080"
+
+[admin]
+secret = "change-me-to-a-secure-password"
+
+[merchant]
+name = "Example Store"
+secret = "your-merchant-secret-key-here"
+allowed_origins = [
+    "https://checkout.your-app.example.com",
+    "http://localhost:3000",
+]
+# unknown_transfer_webhook_url = "https://your-app.example.com/webhooks/unknown-transfer"
+
+[api_keys]
+etherscan_api_key = "YOUR_ETHERSCAN_KEY"
+tronscan_api_key = "YOUR_TRONSCAN_KEY"
+
+[[wallets]]
+blockchain = "eth"
+address = "0xYourEthereumWalletAddress"
+enabled_coins = ["USDT", "USDC"]
+
+[[wallets]]
+blockchain = "polygon"
+address = "0xYourPolygonWalletAddress"
+enabled_coins = ["USDT", "USDC"]
+
+[[wallets]]
+blockchain = "tron"
+address = "TYourTronWalletAddress"
+enabled_coins = ["USDT"]
+```
+
+---
+
+## `[server]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `listen` | string | `"0.0.0.0:8080"` | Socket address to listen on. Overridable with `--listen` CLI flag. |
+
+---
+
+## `[admin]`
+
+| Key | Type | Required | Description |
+|-----|------|----------|-------------|
+| `secret` | string | Yes | Admin password for the Admin API. |
+
+<Aside type="tip">
+On first startup, if `secret` does not start with `$argon2`, the server treats it as plaintext and automatically replaces it in the config file with an Argon2 hash. You can set a memorable password and let the server hash it — no external tooling required.
+</Aside>
+
+The Admin API reads this value and verifies requests using `Ocrch-Admin-Authorization: <plaintext>` headers. The actual comparison is done against the stored Argon2 hash.
+
+---
+
+## `[merchant]`
+
+| Key | Type | Required | Description |
+|-----|------|----------|-------------|
+| `name` | string | Yes | Human-readable merchant name (informational only). |
+| `secret` | string | Yes | HMAC-SHA256 signing key. Share this with your application backend; keep it secret. |
+| `allowed_origins` | array of strings | Yes | Allowed origins for signed checkout URLs. Each entry must be a full origin (`scheme://host[:port]`). |
+| `unknown_transfer_webhook_url` | string | No | If set, Ocrch will POST a signed webhook here whenever it receives a transfer that doesn't match any pending deposit. |
+
+### `allowed_origins` Details
+
+The User API verifies that the origin of the `Ocrch-Signed-Url` header matches one of the entries in `allowed_origins`. This prevents checkout URLs signed by your merchant secret from being used on unauthorized domains.
+
+```toml
+allowed_origins = [
+    "https://checkout.example.com",   # production
+    "http://localhost:3000",           # local dev
+]
+```
+
+---
+
+## `[api_keys]`
+
+| Key | Type | Required | Description |
+|-----|------|----------|-------------|
+| `etherscan_api_key` | string | Yes* | API key for Etherscan-compatible APIs (used for all EVM chains). |
+| `tronscan_api_key` | string | Yes* | API key for Tronscan (used for Tron). |
+
+*Required if you have any wallets configured for the respective chain family. You can omit one if you only use EVM or only Tron wallets, but the server may error on startup if a corresponding wallet is configured.
+
+API keys are available for free at:
+- **Etherscan**: [etherscan.io/apis](https://etherscan.io/apis) (same key works for Polygon, Arbitrum, Base, etc. via their respective explorer APIs)
+- **Tronscan**: [tronscan.org](https://tronscan.org)
+
+---
+
+## `[[wallets]]`
+
+Each `[[wallets]]` section defines one receiving wallet. You can have as many as you need, across as many chains as you like.
+
+| Key | Type | Required | Description |
+|-----|------|----------|-------------|
+| `blockchain` | string | Yes | Chain identifier (see table below). |
+| `address` | string | Yes | Wallet address on that chain. |
+| `enabled_coins` | array of strings | Yes | Stablecoins to accept at this wallet. |
+| `starting_tx` | string | No | Transaction hash to use as the sync start point when no transfers exist in the database yet. |
+
+### Blockchain Identifiers
+
+| Identifier | Chain |
+|-----------|-------|
+| `eth` | Ethereum mainnet |
+| `polygon` | Polygon |
+| `base` | Base (Coinbase L2) |
+| `arb` | Arbitrum One |
+| `op` | Optimism |
+| `linea` | Linea |
+| `avaxc` | Avalanche C-Chain |
+| `tron` | Tron mainnet |
+
+### Stablecoin Identifiers
+
+| Identifier | Coin |
+|-----------|------|
+| `USDT` | Tether |
+| `USDC` | USD Coin |
+| `DAI` | Dai |
+
+Not every coin is available on every chain. If you configure an unsupported combination, the wallet will simply never receive any matching transfers.
+
+### `starting_tx`
+
+When Ocrch starts watching a wallet for the first time (no transfers in the database), it needs a point from which to begin scanning. Without `starting_tx` it may scan from the beginning of chain history, which is slow. Setting `starting_tx` to a recent transaction hash (EVM) or hash (Tron) tells Ocrch to start scanning from that transaction's block/timestamp.
+
+```toml
+[[wallets]]
+blockchain = "eth"
+address = "0xYourEthereumWalletAddress"
+enabled_coins = ["USDT", "USDC"]
+starting_tx = "0xabc123..."   # a recent tx on this wallet
+```
+
+---
+
+## Config Hot Reload
+
+Send `SIGHUP` to the server process to reload the config file without restarting:
+
+```bash
+kill -HUP <pid>
+# or with Docker:
+docker kill --signal=HUP ocrch
+```
+
+The following settings are reloaded live:
+- `[admin]` secret
+- `[merchant]` settings (including `allowed_origins` and `secret`)
+- Pooling tick intervals (derived from active pending deposits)
+
+Wallet configuration changes (adding/removing wallets) and API key changes currently require a restart.
+
+---
+
+## Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DATABASE_URL` | Yes | PostgreSQL connection URL, e.g. `postgres://user:pass@host:5432/dbname` |
+| `RUST_LOG` | No | Log filter directive. Default: `info,sqlx=warn,tower_http=debug` |

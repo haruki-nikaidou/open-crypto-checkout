@@ -1,0 +1,167 @@
+---
+title: Webhooks
+description: Receive signed webhook notifications when order status changes or unknown transfers arrive.
+sidebar:
+  order: 3
+---
+
+Ocrch delivers signed HTTP POST requests to your application backend when:
+
+1. An **order status changes** (to `paid`, `expired`, or `cancelled`).
+2. An **unknown transfer** arrives at one of your wallets (a transaction that couldn't be matched to any pending deposit).
+
+## Receiving Webhooks
+
+Your webhook endpoint must:
+
+- Accept `POST` requests with `Content-Type: application/json`.
+- Verify the `Ocrch-Signature` header (see below).
+- Return HTTP `200 OK` to acknowledge receipt.
+- Respond within a reasonable timeout (a few seconds).
+
+<Aside type="caution">
+Ocrch considers a webhook **successfully delivered only when the response status is exactly `200 OK`**. Any other status code (including `201`, `204`, `4xx`, `5xx`) is treated as a failure and triggers a retry.
+</Aside>
+
+## Retry Schedule
+
+If your endpoint does not return `200 OK`, Ocrch retries the webhook with exponential back-off:
+
+| Attempt | Delay |
+|---------|-------|
+| 1 | 1 second |
+| 2 | 2 seconds |
+| 3 | 4 seconds |
+| 4 | 8 seconds |
+| 5 | 16 seconds |
+| … | … |
+| 12 | 2048 seconds (~34 min) |
+
+After 12 attempts the webhook is not retried automatically, but an admin can trigger a manual resend via the [Admin API](/reference/admin-api/).
+
+## Verifying Webhook Signatures
+
+All webhooks are signed with the merchant HMAC key using the same algorithm as the Service API. To verify:
+
+1. Read the `Ocrch-Signature` header: `{timestamp}.{base64_signature}`.
+2. Compute `HMAC-SHA256("{timestamp}.{raw_json_body}", merchant_secret)`.
+3. Compare your computed HMAC (base64-encoded) to `base64_signature`.
+4. Optionally, reject signatures where `timestamp` is too far in the past.
+
+```ts
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+function verifyWebhookSignature(
+  rawBody: string,
+  signatureHeader: string,
+  merchantSecret: string
+): boolean {
+  const [timestamp, receivedSig] = signatureHeader.split(".");
+  if (!timestamp || !receivedSig) return false;
+
+  const message = `${timestamp}.${rawBody}`;
+  const expected = createHmac("sha256", merchantSecret)
+    .update(message)
+    .digest("base64");
+
+  try {
+    return timingSafeEqual(Buffer.from(expected), Buffer.from(receivedSig));
+  } catch {
+    return false;
+  }
+}
+
+// Express.js example
+app.post("/webhooks/ocrch", express.raw({ type: "application/json" }), (req, res) => {
+  const sig = req.headers["ocrch-signature"] as string;
+  if (!verifyWebhookSignature(req.body.toString(), sig, process.env.MERCHANT_SECRET!)) {
+    return res.sendStatus(401);
+  }
+
+  const payload = JSON.parse(req.body.toString());
+  // Handle payload...
+  res.sendStatus(200);
+});
+```
+
+---
+
+## Webhook Payloads
+
+### Order Status Changed
+
+Sent when an order transitions to `paid`, `expired`, or `cancelled`.
+
+**Header:** `Ocrch-Signature: {timestamp}.{base64_signature}`
+
+**Body:**
+
+```json
+{
+  "event_type": "order_status_changed",
+  "order_id": "550e8400-e29b-41d4-a716-446655440000",
+  "merchant_order_id": "your-order-123",
+  "status": "paid",
+  "amount": "19.99",
+  "timestamp": 1711900800
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `event_type` | string | Always `"order_status_changed"` |
+| `order_id` | UUID string | Internal Ocrch order ID |
+| `merchant_order_id` | string | Your original order identifier |
+| `status` | string | New status: `"paid"`, `"expired"`, or `"cancelled"` |
+| `amount` | string | Payment amount (decimal string) |
+| `timestamp` | integer | Unix timestamp when the event was emitted |
+
+**Configuration:** Set `webhook_url` per-order when calling the [Service API create order endpoint](/reference/service-api/#post-orders).
+
+### Unknown Transfer
+
+Sent when a transfer arrives at one of your wallets but cannot be matched to any pending deposit. Useful for detecting overpayments, test transactions, or manual payments.
+
+**Body:**
+
+```json
+{
+  "event_type": "unknown_transfer",
+  "transfer_id": 42,
+  "blockchain": "eth",
+  "timestamp": 1711900800
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `event_type` | string | Always `"unknown_transfer"` |
+| `transfer_id` | integer | Internal transfer record ID |
+| `blockchain` | string | Chain identifier (e.g. `"eth"`, `"tron"`) |
+| `timestamp` | integer | Unix timestamp when the event was emitted |
+
+**Configuration:** Set `merchant.unknown_transfer_webhook_url` in `ocrch-config.toml`.
+
+---
+
+## Idempotency
+
+Webhooks may be delivered more than once in edge cases (retries after a transient failure where your server returned 200 but the response was lost). Always process webhooks idempotently — check whether you have already processed a given `order_id` / `transfer_id` before taking action.
+
+---
+
+## Manual Resend
+
+Admins can trigger a manual resend of any webhook via the Admin API:
+
+```bash
+# Resend order status webhook
+curl -X POST https://checkout-api.example.com/api/v1/admin/orders/{order_id}/resend-webhook \
+  -H "Ocrch-Admin-Authorization: your-admin-secret"
+
+# Resend unknown transfer webhook
+curl -X POST https://checkout-api.example.com/api/v1/admin/transfers/{transfer_id}/resend-webhook \
+  -H "Ocrch-Admin-Authorization: your-admin-secret"
+```
+
+See the [Admin API reference](/reference/admin-api/) for full details.

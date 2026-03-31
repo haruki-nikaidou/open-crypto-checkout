@@ -1,0 +1,257 @@
+---
+title: Frontend Development
+description: Build a checkout frontend that integrates with the Open Crypto Checkout User API.
+sidebar:
+  order: 2
+---
+
+Open Crypto Checkout is headless — you build the checkout UI. This guide walks through the full integration from generating a signed URL to displaying real-time payment status.
+
+## How the Frontend Works
+
+Your application backend creates an order and generates a **signed checkout URL** pointing to your frontend. The user is redirected to that URL. The frontend then:
+
+1. Reads the `order_id` from the URL query parameters.
+2. Calls the User API to fetch available payment options.
+3. Lets the user select a chain and stablecoin.
+4. Calls the User API to create a pending deposit and receive the wallet address.
+5. Opens a WebSocket connection to monitor payment status in real time.
+6. Redirects the user when payment is confirmed.
+
+All User API requests must include the signed URL in the `Ocrch-Signed-Url` header and a fresh signature in `Ocrch-Signature`. See [Authentication](/reference/authentication/) for the signing algorithm.
+
+---
+
+## Step 1 — Generate a Signed URL (Backend)
+
+Your application backend creates the order and builds a signed URL for the frontend. The URL can point to any page — typically your own checkout domain.
+
+```ts
+import { createHmac } from "node:crypto";
+
+function signCheckoutUrl(url: string, merchantSecret: string): string {
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const message = `${url}.${timestamp}`;
+  const sig = createHmac("sha256", merchantSecret)
+    .update(message)
+    .digest("base64");
+  return `${timestamp}.${sig}`;
+}
+
+// After creating the order:
+const checkoutUrl = `https://checkout.example.com/pay?order_id=${orderId}`;
+const signature = signCheckoutUrl(checkoutUrl, process.env.MERCHANT_SECRET!);
+
+// Redirect the user to the checkout URL.
+// The frontend will need both the URL and the signature.
+// A common pattern is to embed the signature in the URL:
+const redirectUrl = `${checkoutUrl}&sig=${encodeURIComponent(signature)}`;
+```
+
+<Aside type="note">
+The signature covers the **full URL** (including query parameters). If you add the signature itself as a query parameter, make sure the URL you sign does **not** include the `sig` parameter — sign the base URL first, then append `sig`.
+</Aside>
+
+---
+
+## Step 2 — Read Order Info from the URL (Frontend)
+
+On page load, extract the `order_id` and the pre-computed signature from the URL:
+
+```ts
+const params = new URLSearchParams(window.location.search);
+const orderId = params.get("order_id");
+const signature = params.get("sig");           // your pre-computed Ocrch-Signature value
+const signedUrl = window.location.href         // the full URL that was signed
+  .replace(/&sig=[^&]*/, "");                  // strip the sig param — this is what was signed
+```
+
+---
+
+## Step 3 — Fetch Available Payment Options
+
+Call `GET /api/v1/user/chains` to get the list of chain/coin pairs your server supports:
+
+```ts
+const OCRCH_BASE = "https://checkout-api.example.com";
+
+async function getChains(signedUrl: string, signature: string) {
+  const res = await fetch(`${OCRCH_BASE}/api/v1/user/chains`, {
+    headers: {
+      "Ocrch-Signed-Url": signedUrl,
+      "Ocrch-Signature": signature,
+    },
+  });
+  return res.json() as Promise<ChainCoinPair[]>;
+}
+
+interface ChainCoinPair {
+  blockchain: string;   // e.g. "eth", "polygon", "tron"
+  stablecoin: string;   // e.g. "USDT", "USDC", "DAI"
+  wallet_address: string;
+}
+```
+
+Render these as selectable options for the user.
+
+---
+
+## Step 4 — Create a Pending Deposit
+
+When the user picks a chain and stablecoin, POST to `/api/v1/user/orders/{order_id}/payment`:
+
+```ts
+async function selectPaymentMethod(
+  orderId: string,
+  blockchain: string,
+  stablecoin: string,
+  signedUrl: string,
+  signature: string
+) {
+  const res = await fetch(
+    `${OCRCH_BASE}/api/v1/user/orders/${orderId}/payment`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Ocrch-Signed-Url": signedUrl,
+        "Ocrch-Signature": signature,
+      },
+      body: JSON.stringify({ blockchain, stablecoin }),
+    }
+  );
+
+  if (!res.ok) throw new Error(await res.text());
+  return res.json() as Promise<PaymentDetail>;
+}
+
+interface PaymentDetail {
+  order_id: string;
+  wallet_address: string;
+  amount: string;   // decimal string, e.g. "19.99"
+  blockchain: string;
+  stablecoin: string;
+}
+```
+
+Display `wallet_address` and `amount` prominently. The user must send **exactly** `amount` of `stablecoin` on `blockchain` to `wallet_address`.
+
+<Aside type="caution">
+If the user switches chains, calling this endpoint again creates a new pending deposit. All pending deposits for an order are cleaned up when one is fulfilled. Make sure your UI handles this gracefully (e.g. replace the previously shown address).
+</Aside>
+
+---
+
+## Step 5 — Monitor Payment Status via WebSocket
+
+Open a WebSocket connection to `/api/v1/user/orders/{order_id}/ws`. Authentication headers must be sent during the HTTP upgrade request.
+
+```ts
+function connectOrderWebSocket(
+  orderId: string,
+  signedUrl: string,
+  signature: string,
+  onStatus: (order: OrderResponse) => void,
+  onClose: () => void
+): WebSocket {
+  // Note: browsers cannot set custom headers in the WebSocket constructor.
+  // Use a URL-based workaround or a server-side proxy that injects the headers.
+  // The example below works in Node.js environments (e.g. SSR, Electron).
+  const ws = new WebSocket(`${OCRCH_BASE.replace("https", "wss")}/api/v1/user/orders/${orderId}/ws`, {
+    headers: {
+      "Ocrch-Signed-Url": signedUrl,
+      "Ocrch-Signature": signature,
+    },
+  } as any);
+
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    if (msg.type === "status_update") {
+      onStatus(msg.order);
+      if (["paid", "expired", "cancelled"].includes(msg.order.status)) {
+        ws.close();
+      }
+    }
+  };
+
+  ws.onclose = onClose;
+  return ws;
+}
+```
+
+### Browser WebSocket Header Limitation
+
+Browsers do not allow setting custom HTTP headers on WebSocket connections. The recommended patterns are:
+
+**Option A — Backend proxy**: Your checkout page calls your own backend which adds the required headers and proxies the WebSocket to Ocrch.
+
+**Option B — Signed URL in query param**: Implement a short-lived token endpoint on your backend that returns a one-time auth token, then have Ocrch (or your proxy) validate it. (Custom implementation required.)
+
+**Option C — Polling fallback**: Use `GET /api/v1/user/orders/{order_id}/status` periodically instead of WebSocket. Less efficient but simpler for browser-only deployments.
+
+### WebSocket Message Format
+
+The server sends JSON text frames:
+
+```json
+// Initial and subsequent status updates
+{"type": "status_update", "order": {"order_id": "...", "status": "pending", "amount": "19.99", ...}}
+
+// Error (does not close the connection)
+{"type": "error", "code": 4004, "reason": "order not found"}
+```
+
+After delivering a terminal status (`paid`, `expired`, `cancelled`), the server sends a normal WebSocket close frame (code `1000`).
+
+---
+
+## Step 6 — Handle Terminal States
+
+React to the order status from the WebSocket:
+
+```ts
+function handleOrderStatus(order: OrderResponse) {
+  switch (order.status) {
+    case "paid":
+      window.location.href = `/success?order=${order.merchant_order_id}`;
+      break;
+    case "cancelled":
+      showMessage("Order was cancelled.");
+      break;
+    case "expired":
+      showMessage("Order expired. Please try again.");
+      break;
+  }
+}
+```
+
+---
+
+## Cancelling an Order
+
+If the user wants to cancel, call `POST /api/v1/user/orders/{order_id}/cancel`:
+
+```ts
+async function cancelOrder(orderId: string, signedUrl: string, signature: string) {
+  await fetch(`${OCRCH_BASE}/api/v1/user/orders/${orderId}/cancel`, {
+    method: "POST",
+    headers: {
+      "Ocrch-Signed-Url": signedUrl,
+      "Ocrch-Signature": signature,
+    },
+  });
+}
+```
+
+---
+
+## Signature Freshness
+
+The `Ocrch-Signature` header encodes a Unix timestamp. Ocrch rejects signatures that are too old (the exact window is server-configured). For long-running checkout sessions, you may need to re-sign the URL periodically. A simple approach is to have your checkout page call your backend to refresh the signature when it detects an authentication error (HTTP 401 with body `"signature expired"`).
+
+---
+
+## Full Reference
+
+- [Authentication](/reference/authentication/) — signing algorithm details.
+- [User API](/reference/user-api/) — complete endpoint reference.

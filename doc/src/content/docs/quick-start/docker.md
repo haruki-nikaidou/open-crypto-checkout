@@ -1,0 +1,180 @@
+---
+title: Deploy with Docker
+description: Run Open Crypto Checkout using the pre-built Docker image from GitHub Container Registry.
+sidebar:
+  order: 2
+---
+
+
+The fastest way to run Ocrch is with the pre-built Docker image published to the GitHub Container Registry (GHCR). A PostgreSQL database is the only external dependency.
+
+## Prerequisites
+
+- Docker and Docker Compose installed
+- A PostgreSQL 14+ database (or use the compose file below)
+- Etherscan API key (for EVM chains) — free tier is sufficient
+- Tronscan API key (for Tron) — free tier is sufficient
+- Dedicated wallet addresses for each chain you want to accept
+
+## Pull the Image
+
+```bash
+docker pull ghcr.io/haruki-nikaidou/ocrch-server:latest
+```
+
+Tagged releases are also available using the short commit SHA:
+
+```bash
+docker pull ghcr.io/haruki-nikaidou/ocrch-server:<SHA>
+```
+
+## Quick Start with Docker Compose
+
+<Steps>
+
+1. **Create a config file**
+
+   Copy the example configuration and fill in your values:
+
+   ```bash
+   curl -o ocrch-config.toml \
+     https://raw.githubusercontent.com/haruki-nikaidou/open-crypto-checkout/main/ocrch-config.example.toml
+   ```
+
+   Edit `ocrch-config.toml` — at minimum you must set:
+
+   - `admin.secret` — a strong password (the server will Argon2-hash it on first boot)
+   - `merchant.secret` — your HMAC signing key shared with your application backend
+   - `merchant.allowed_origins` — the origin(s) of your checkout frontend
+   - `[[wallets]]` — at least one wallet entry
+   - `[api_keys]` — your Etherscan and/or Tronscan API keys (see [Configuration](/guides/configuration/))
+
+2. **Create a `docker-compose.yml`**
+
+   ```yaml
+   services:
+     db:
+       image: postgres:16-alpine
+       environment:
+         POSTGRES_DB: ocrch
+         POSTGRES_USER: ocrch
+         POSTGRES_PASSWORD: changeme
+       volumes:
+         - pgdata:/var/lib/postgresql/data
+       healthcheck:
+         test: ["CMD-SHELL", "pg_isready -U ocrch"]
+         interval: 5s
+         retries: 10
+
+     ocrch:
+       image: ghcr.io/haruki-nikaidou/ocrch-server:latest
+       depends_on:
+         db:
+           condition: service_healthy
+       environment:
+         DATABASE_URL: postgres://ocrch:changeme@db:5432/ocrch
+         RUST_LOG: info,sqlx=warn
+       volumes:
+         - ./ocrch-config.toml:/app/ocrch-config.toml:ro
+       ports:
+         - "8080:8080"
+       command: ["--migrate"]
+
+   volumes:
+     pgdata:
+   ```
+
+   <Aside type="caution">
+   Change `POSTGRES_PASSWORD` and `merchant.secret` / `admin.secret` before deploying to production. Never commit secrets to version control.
+   </Aside>
+
+3. **Start the services**
+
+   ```bash
+   docker compose up -d
+   ```
+
+   On first boot the server will:
+   - Run database migrations automatically (because of the `--migrate` flag).
+   - Detect that `admin.secret` is plaintext, hash it with Argon2, and rewrite the config file.
+
+4. **Verify the server is healthy**
+
+   ```bash
+   curl http://localhost:8080/health
+   ```
+
+   Expected response:
+
+   ```json
+   {"status":"ok","version":"0.1.0"}
+   ```
+
+</Steps>
+
+## Configuration File Location
+
+By default the server reads `./ocrch-config.toml` (relative to its working directory, which is `/app` inside the container). You can override this with the `-c` flag:
+
+```yaml
+command: ["-c", "/etc/ocrch/config.toml", "--migrate"]
+```
+
+## CLI Reference
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-c, --config <PATH>` | `./ocrch-config.toml` | Path to the TOML config file |
+| `--listen <ADDR>` | value from config | Override the listen address (e.g. `0.0.0.0:8080`) |
+| `--migrate` | — | Run database migrations on startup |
+
+## Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DATABASE_URL` | Yes | PostgreSQL connection URL |
+| `RUST_LOG` | No | Log filter (default: `info,sqlx=warn,tower_http=debug`) |
+
+## Signals
+
+| Signal | Behavior |
+|--------|----------|
+| `SIGTERM` / `SIGINT` | Graceful shutdown — stops accepting new requests, finishes in-flight work |
+| `SIGHUP` | Hot-reload the config file without restarting |
+
+## Reverse Proxy
+
+Ocrch listens on `0.0.0.0:8080` by default. In production, place it behind a reverse proxy such as Nginx or Caddy that handles TLS termination.
+
+**Caddy example:**
+
+```
+checkout-api.example.com {
+    reverse_proxy ocrch:8080
+}
+```
+
+**Nginx example:**
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name checkout-api.example.com;
+
+    location / {
+        proxy_pass http://ocrch:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+    }
+}
+```
+
+The `Upgrade` and `Connection` headers are required for WebSocket support on the `/api/v1/user/orders/{id}/ws` endpoint.
+
+## Next Steps
+
+- [Configuration reference](/guides/configuration/) — detailed documentation for every config option.
+- [Frontend Development](/guides/frontend/) — build your checkout page.
+- [Service API](/reference/service-api/) — create orders from your application backend.
