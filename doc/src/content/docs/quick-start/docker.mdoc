@@ -30,7 +30,7 @@ docker pull ghcr.io/haruki-nikaidou/ocrch-server:<SHA>
 
 ## Quick Start with Docker Compose
 
-<Steps>
+{% steps %}
 
 1. **Create a config file**
 
@@ -84,9 +84,11 @@ docker pull ghcr.io/haruki-nikaidou/ocrch-server:<SHA>
      pgdata:
    ```
 
-   <Aside type="caution">
+   {% aside type="caution" %}
+
    Change `POSTGRES_PASSWORD` and `merchant.secret` / `admin.secret` before deploying to production. Never commit secrets to version control.
-   </Aside>
+   
+   {% /aside %}
 
 3. **Start the services**
 
@@ -109,8 +111,7 @@ docker pull ghcr.io/haruki-nikaidou/ocrch-server:<SHA>
    ```json
    {"status":"ok","version":"0.1.0"}
    ```
-
-</Steps>
+{% /steps %}
 
 ## Configuration File Location
 
